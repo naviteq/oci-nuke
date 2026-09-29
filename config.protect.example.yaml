@@ -1,0 +1,64 @@
+# oci-nuke example: keep Object Storage and tag namespaces out of a run.
+#
+# A worked version of the most common exclusion request — "nuke the compartment, but
+# do not touch the buckets holding Terraform state, the objects inside them, or the
+# tenancy's tag namespaces." Validate it the same way as any other config:
+#
+#     oci-nuke config validate --config config.protect.example.yaml
+#
+# Replace every placeholder OCID and bucket name before using it. See
+# config.example.yaml for the full annotated key reference.
+
+tenancy-id: ocid1.tenancy.oc1..aaaaaaaaexampleexampleexampleexampleexampleexampleexam
+
+regions:
+  - eu-frankfurt-1
+  - us-ashburn-1
+
+compartment-blocklist:
+  - ocid1.compartment.oc1..aaaaaaaaexampleproductioncompartmentexampleexampleexampl
+
+# ── Tag namespaces ──────────────────────────────────────────────────────────────
+#
+# Excluded by type rather than by filter. A tag namespace is a tenancy-wide IAM
+# object, it is enumerated only in the home region, and removing one is a cascade:
+# every tag definition and every value under it goes with it, including tags applied
+# to resources in compartments this run never targeted. No per-compartment filter
+# makes that safe, so the type is switched off wholesale.
+resource-types:
+  excludes:
+    - TagNamespace
+
+# ── Buckets ─────────────────────────────────────────────────────────────────────
+#
+# Protected by tag, not by name. A tag travels with the bucket: a new state bucket
+# created next month is protected the moment it is tagged, with no config change
+# here. `defined: true` reads a defined tag ("<namespace>.<key>") instead of a
+# freeform one; use it if your tag namespace is itself protected from edits.
+#
+# This covers Bucket. It does NOT cover the objects inside — see below.
+settings:
+  protect:
+    tags:
+      - key: Persistent
+        value: "true"
+
+# ── Objects inside those buckets ────────────────────────────────────────────────
+#
+# Object Storage objects carry no OCI tags at all — only buckets do — so
+# settings.protect.tags can never match an ObjectVersion, and a tagged bucket whose
+# objects are unfiltered still has every version listed for deletion. The bucket
+# name is the only property that ties a version back to what protects it, which is
+# why this one list is by name and has to be kept in step with the tagged buckets.
+#
+# Filters are keyed by the OCID of the compartment the resources live in — the
+# compartment that owns the buckets, which is not necessarily the run's target.
+filters:
+  ocid1.compartment.oc1..aaaaaaaaexamplesandboxcompartmentexampleexampleexamplex:
+    filters:
+      ObjectVersion:
+        - property: bucket
+          type: In
+          values:
+            - my-terraform-state
+            - my-terraform-state-replica

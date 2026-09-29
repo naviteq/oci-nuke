@@ -1,0 +1,254 @@
+---
+name: Install oci-nuke
+description: >-
+  Download a released oci-nuke archive, verify its sha256 against that release's
+  own checksums.txt, and put the binary on PATH. The cosign .sig/.pem pair that
+  ships alongside every archive is NOT verified here: cosign is not present on a
+  GitHub-hosted runner and checking the signature would need its own install
+  step. That is a follow-up, and it is stated here so no reader assumes the
+  signatures are being checked when they are not.
+
+inputs:
+  version:
+    description: >-
+      Released tag to install, e.g. "v1.0.5". Must be an exact vX.Y.Z tag.
+      Never "latest" and never a branch: plan and apply are separate runs, and a
+      moving ref would change the binary between them.
+    required: true
+  token:
+    description: >-
+      Token with read access to the release. Required while naviteq/oci-nuke
+      is private: the release asset is not anonymously readable, and an
+      unauthenticated download answers 404, which reads as a missing release
+      rather than as a missing credential.
+    required: false
+    default: ""
+  repository:
+    description: Repository whose release the archive is downloaded from.
+    required: false
+    default: naviteq/oci-nuke
+
+outputs:
+  version:
+    description: >-
+      The single line printed by `oci-nuke version`, e.g.
+      "oci-nuke v1.0.5 (commit <sha>, built <date>)".
+    value: ${{ steps.verify.outputs.version }}
+  path:
+    description: >-
+      Absolute path to the installed binary itself, not to the directory holding
+      it. The directory is what was appended to GITHUB_PATH.
+    value: ${{ steps.install.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        OCI_NUKE_VERSION: ${{ inputs.version }}
+        OCI_NUKE_TOKEN: ${{ inputs.token }}
+        OCI_NUKE_REPOSITORY: ${{ inputs.repository }}
+      run: |
+        set -euo pipefail
+        trap 'echo "::endgroup::"' EXIT
+        echo "::group::Validate oci-nuke install inputs"
+
+        # Named separately from the format check below, because "latest" is the specific
+        # mistake worth explaining rather than just rejecting.
+        if [[ "${OCI_NUKE_VERSION}" == "latest" ]]; then
+          echo "::error::version must be an exact tag, never 'latest' -- plan and apply are separate runs, and a moving ref would install a different binary in each."
+          exit 1
+        fi
+        if ! printf '%s' "${OCI_NUKE_VERSION}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "::error::version must match vX.Y.Z, got '${OCI_NUKE_VERSION}'."
+          exit 1
+        fi
+        # Named here because gh would otherwise fail on a bare 404 that names nothing.
+        if [[ -z "${OCI_NUKE_TOKEN}" ]]; then
+          echo "::error::the token input is required: ${OCI_NUKE_REPOSITORY} is private, so its release assets are not anonymously readable and the download answers 404 without a token that can read them."
+          exit 1
+        fi
+
+    - name: Resolve platform and archive name
+      id: platform
+      shell: bash
+      env:
+        OCI_NUKE_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        trap 'echo "::endgroup::"' EXIT
+        echo "::group::Resolve the oci-nuke archive for this runner"
+
+        case "${RUNNER_OS}" in
+          Linux) os="linux" ;;
+          macOS) os="darwin" ;;
+          *)
+            echo "::error::unsupported runner OS ${RUNNER_OS}: oci-nuke publishes linux and darwin archives only."
+            exit 1
+            ;;
+        esac
+        case "${RUNNER_ARCH}" in
+          X64)   arch="amd64" ;;
+          ARM64) arch="arm64" ;;
+          *)
+            echo "::error::unsupported runner architecture ${RUNNER_ARCH}: oci-nuke publishes amd64 and arm64 archives only."
+            exit 1
+            ;;
+        esac
+        # .goreleaser.yml's builds.ignore drops darwin/amd64 deliberately, so an Intel macOS
+        # runner has no archive to download. Named explicitly rather than left to a 404.
+        if [[ "${os}" == "darwin" && "${arch}" == "amd64" ]]; then
+          echo "::error::no oci-nuke archive is built for darwin/amd64 (runner ${RUNNER_OS}/${RUNNER_ARCH}): the release ships linux/amd64, linux/arm64 and darwin/arm64 only."
+          exit 1
+        fi
+
+        # Matches .goreleaser.yml's archives.name_template
+        #   "{{ .ProjectName }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ .Arm }}"
+        # plus the default .tar.gz format. {{ .Arm }} renders empty for arm64, and the version
+        # input already carries the leading v, so it is not added again here.
+        archive="oci-nuke-${OCI_NUKE_VERSION}-${os}-${arch}.tar.gz"
+        echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+        echo "resolved ${RUNNER_OS}/${RUNNER_ARCH} to ${archive}"
+
+    - name: Download the release archive and checksums
+      id: download
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        OCI_NUKE_VERSION: ${{ inputs.version }}
+        OCI_NUKE_REPOSITORY: ${{ inputs.repository }}
+        ARCHIVE: ${{ steps.platform.outputs.archive }}
+      run: |
+        set -euo pipefail
+        trap 'echo "::endgroup::"' EXIT
+        echo "::group::Download oci-nuke ${OCI_NUKE_VERSION}"
+
+        download_dir="${RUNNER_TEMP}/oci-nuke-download"
+        rm -rf "${download_dir}"
+        mkdir -p "${download_dir}"
+
+        gh release download "${OCI_NUKE_VERSION}" \
+          --repo "${OCI_NUKE_REPOSITORY}" \
+          --pattern "${ARCHIVE}" \
+          --pattern checksums.txt \
+          --dir "${download_dir}"
+
+        echo "dir=${download_dir}" >> "$GITHUB_OUTPUT"
+
+    - name: Verify the archive checksum
+      id: checksum
+      shell: bash
+      env:
+        ARCHIVE: ${{ steps.platform.outputs.archive }}
+        DOWNLOAD_DIR: ${{ steps.download.outputs.dir }}
+      run: |
+        set -euo pipefail
+        trap 'echo "::endgroup::"' EXIT
+        echo "::group::Verify the sha256 of ${ARCHIVE}"
+
+        # The check runs from the download directory so the bare filename in the checksum line
+        # resolves.
+        cd "${DOWNLOAD_DIR}"
+
+        # checksums.txt covers every artifact in the release, including the .sig/.pem files
+        # whose names are the archive's name plus a suffix. The archive's own line is therefore
+        # selected by an exact match on the filename field, not by a substring grep, which
+        # would also match "<archive>.sig". goreleaser writes "<sha256>  <name>", so $2 is the
+        # name and printing $0 preserves the two-space form that sha256sum -c expects.
+        line="$(awk -v want="${ARCHIVE}" '$2 == want { print $0 }' checksums.txt)"
+        if [[ -z "${line}" ]]; then
+          echo "::error::checksums.txt in release has no entry for ${ARCHIVE}; refusing to install an archive whose checksum cannot be verified."
+          exit 1
+        fi
+        if [[ "$(printf '%s\n' "${line}" | wc -l | tr -d ' ')" != "1" ]]; then
+          echo "::error::checksums.txt has more than one entry for ${ARCHIVE}; refusing to guess which checksum is authoritative."
+          exit 1
+        fi
+
+        # sha256sum is present on Linux runners; macOS ships shasum -a 256 instead. Hardcoding
+        # either one makes this action silently single-platform.
+        if command -v sha256sum >/dev/null 2>&1; then
+          printf '%s\n' "${line}" | sha256sum -c -
+        elif command -v shasum >/dev/null 2>&1; then
+          printf '%s\n' "${line}" | shasum -a 256 -c -
+        else
+          echo "::error::neither sha256sum nor shasum is available on this runner; the checksum cannot be verified, and this action does not install an unverified binary."
+          exit 1
+        fi
+
+        # Recorded so the step summary can report what actually happened. The summary runs
+        # under `if: always()`, so a hardcoded "verified" row there would keep claiming the
+        # checksum was checked on runs where this step never reached this line.
+        echo "verified=true" >> "$GITHUB_OUTPUT"
+
+    - name: Extract and install oci-nuke
+      id: install
+      shell: bash
+      env:
+        ARCHIVE: ${{ steps.platform.outputs.archive }}
+        DOWNLOAD_DIR: ${{ steps.download.outputs.dir }}
+      run: |
+        set -euo pipefail
+        trap 'echo "::endgroup::"' EXIT
+        echo "::group::Install oci-nuke on PATH"
+
+        bin_dir="${RUNNER_TEMP}/oci-nuke-bin"
+        rm -rf "${bin_dir}"
+        mkdir -p "${bin_dir}"
+
+        # The binary sits at the archive root, alongside README.md, LICENSE and CHANGELOG.md --
+        # goreleaser wraps nothing in a directory here, so no --strip-components is needed and
+        # only the one member is extracted.
+        tar -xzf "${DOWNLOAD_DIR}/${ARCHIVE}" -C "${bin_dir}" oci-nuke
+        chmod +x "${bin_dir}/oci-nuke"
+        echo "${bin_dir}" >> "$GITHUB_PATH"
+        echo "path=${bin_dir}/oci-nuke" >> "$GITHUB_OUTPUT"
+
+    - name: Verify the installed binary
+      id: verify
+      shell: bash
+      env:
+        BIN_PATH: ${{ steps.install.outputs.path }}
+      run: |
+        set -euo pipefail
+        trap 'echo "::endgroup::"' EXIT
+        echo "::group::Verify oci-nuke"
+
+        # GITHUB_PATH takes effect from the next step onwards, never within the step that wrote
+        # it, so the binary is invoked by absolute path here.
+        installed="$("${BIN_PATH}" version | head -n 1)"
+        echo "${installed}"
+        echo "version=${installed}" >> "$GITHUB_OUTPUT"
+
+    - name: Write step summary
+      if: ${{ always() }}
+      shell: bash
+      env:
+        OCI_NUKE_VERSION: ${{ inputs.version }}
+        OCI_NUKE_REPOSITORY: ${{ inputs.repository }}
+        ARCHIVE: ${{ steps.platform.outputs.archive }}
+        INSTALLED: ${{ steps.verify.outputs.version }}
+        BIN_PATH: ${{ steps.install.outputs.path }}
+        CHECKSUM_VERIFIED: ${{ steps.checksum.outputs.verified }}
+      run: |
+        set -euo pipefail
+        trap 'echo "::endgroup::"' EXIT
+        echo "::group::Write the oci-nuke install summary"
+        {
+          echo "## Install oci-nuke"
+          echo ""
+          echo "| Field | Value |"
+          echo "| ----- | ----- |"
+          echo "| Repository | \`${OCI_NUKE_REPOSITORY}\` |"
+          echo "| Requested version | \`${OCI_NUKE_VERSION}\` |"
+          echo "| Archive | \`${ARCHIVE:-—}\` |"
+          if [[ "${CHECKSUM_VERIFIED:-}" == "true" ]]; then
+            echo "| Checksum | sha256 verified against the release's checksums.txt |"
+          else
+            echo "| Checksum | **not verified — the run did not get that far** |"
+          fi
+          echo "| Signature | not verified (cosign is absent from GitHub-hosted runners) |"
+          echo "| Installed | \`${INSTALLED:-—}\` |"
+          echo "| Path | \`${BIN_PATH:-—}\` |"
+        } >> "$GITHUB_STEP_SUMMARY"

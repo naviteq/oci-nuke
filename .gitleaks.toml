@@ -1,0 +1,28 @@
+# Gitleaks configuration.
+#
+# Extends the upstream default ruleset rather than replacing it -- everything gitleaks
+# detects out of the box still applies.
+[extend]
+useDefault = true
+
+# The only allowlisted findings are three literal strings that gitleaks' `generic-api-key`
+# heuristic flagged in test fixtures. That rule fires on an identifier containing "key"
+# followed by a quoted string with enough entropy; the fixtures were `fixtureLeaf{key: "..."}`
+# and `const protectedKey = "..."`. None of the values is a secret -- they are display names
+# for in-memory Go test resources that never leave the process.
+#
+# The fields have since been renamed from `key` to `uid` so the heuristic no longer fires on
+# the current tree. This allowlist exists only because CI scans the commit range, and the
+# strings remain in the diffs of commits already pushed.
+#
+# Deliberately allowlisted by exact value rather than by rule or by path: suppressing
+# `generic-api-key` across `resources_test/` would blind the scanner to a real credential
+# committed there later, which is the failure this scanner exists to prevent.
+[allowlist]
+description = "Test-fixture display names misread as API keys by the generic-api-key heuristic"
+regexes = [
+  '''^FixtureLeaf-1$''',
+  '''^ProtectedVolume-1$''',
+  '''^UnprotectedVolume-1$''',
+]
+regexTarget = "secret"

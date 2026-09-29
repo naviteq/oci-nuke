@@ -1,0 +1,76 @@
+name: release
+
+# This repository is a mirror. Its source is a private repository, where release-please owns the
+# version and the changelog; every release there arrives here as a `chore: mirror vX.Y.Z` pull
+# request carrying that version in version.txt. Merging it is the release decision. This
+# workflow turns the merge into a public release:
+#
+#   1. `tag` reads version.txt off the merged commit and pushes vX.Y.Z if it does not exist.
+#   2. `goreleaser` builds, signs and publishes that tag: archives, checksums, the multi-arch
+#      ghcr.io image, cosign signatures bound to this repository's workflow identity.
+#
+# One workflow rather than a tag trigger, because a tag pushed with GITHUB_TOKEN starts no
+# workflow run. goreleaser.yml is therefore called directly, with the tag this run pushed.
+#
+# A push that does not change the version -- a docs-only commit made here, say -- finds its tag
+# already present and releases nothing.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the tag
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merged commit, not `main` resolved later: a second merge landing in between
+          # would otherwise have this job tag the wrong commit.
+          ref: ${{ github.sha }}
+      - name: push the release tag
+        id: tag
+        run: |
+          set -euo pipefail
+
+          version="$(tr -d '[:space:]' < version.txt)"
+          if ! printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version.txt does not contain a bare semantic version: '${version}'."
+            exit 1
+          fi
+
+          # --exit-code answers 2 when the tag is missing, which set -e would treat as a failure.
+          if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
+            echo "v${version} is already tagged; nothing to release."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git tag "v${version}"
+          git push origin "refs/tags/v${version}"
+          echo "pushed v${version}"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+  goreleaser:
+    name: goreleaser
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    permissions:
+      contents: write # create the release and upload archives
+      packages: write # push the image to ghcr.io
+      id-token: write # cosign keyless signing via OIDC
+    uses: ./.github/workflows/goreleaser.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}

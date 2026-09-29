@@ -1,0 +1,95 @@
+# oci-nuke example configuration.
+#
+# Copy to config.yaml, replace the placeholder OCIDs, and validate before your first run:
+#
+#     oci-nuke config validate --config config.yaml
+#
+# `config validate` issues zero OCI API calls, so it is safe to run against anything.
+
+# ── Required ────────────────────────────────────────────────────────────────────
+
+# The tenancy these credentials must belong to. Before listing a single resource,
+# oci-nuke calls GetTenancy and compares the result against this value; a mismatch exits
+# non-zero immediately. This is what stops a config written for one tenancy from ever
+# running against another.
+tenancy-id: ocid1.tenancy.oc1..aaaaaaaaexampleexampleexampleexampleexampleexampleexam
+
+# Regions to scan. Resources are enumerated once per region.
+#
+# Include the tenancy's HOME region if you want IAM coverage. Policy, DynamicGroup,
+# TagNamespace, TagDefault and Compartment are home-region-only: they are enumerated once, in
+# the home region, not once per region. Omit it and those five types are scanned nowhere --
+# the run warns, but the plan simply has nothing to say about them. The home region is often
+# not the region your credentials connect through.
+regions:
+  - eu-frankfurt-1
+  - us-ashburn-1
+
+# Compartments that must never be touched, by OCID. Matching is always by OCID and never
+# by display name: compartment names are unique only within their parent, so a name match
+# is a real bypass vector. The blocklist prunes during traversal, so blocklisting a
+# compartment also protects everything beneath it.
+#
+#   ⚠ DO NOT list the tenancy root here.
+#
+# Every compartment descends from the tenancy root, so a root entry makes every possible
+# target refuse with "target compartment ... is blocklisted". It buys no protection either:
+# the tenancy root is already rejected as a target by a separate, non-negotiable refusal
+# that no config key can switch off. List the compartments you actually want to protect —
+# production, shared services, anything holding state you cannot rebuild.
+compartment-blocklist:
+  - ocid1.compartment.oc1..aaaaaaaaexampleproductioncompartmentexampleexampleexampl
+
+# ── Optional ────────────────────────────────────────────────────────────────────
+
+# Narrow the run to specific resource types. `oci-nuke resource-types` lists every
+# registered name. Omit the block entirely to scan all of them.
+#
+# resource-types:
+#   includes:
+#     - Instance
+#     - BlockVolume
+#   excludes:
+#     - Vault
+
+# settings:
+#   protect:
+#     # Skip anything younger than this. Guards against deleting a resource somebody is
+#     # creating right now, in a compartment you were told was idle.
+#     min-age: 24h
+#     # Skip anything carrying these tags. `defined: true` reads a defined tag rather
+#     # than a freeform one.
+#     tags:
+#       - key: Persistent
+#         value: "true"
+#       - key: MyOrg.ManagedBy
+#         value: terraform
+#         defined: true
+#   vault:
+#     # OCI enforces a 7-30 day deletion window on vaults and keys; a run cannot shorten
+#     # it. Vaults are scheduled, then reported as residue rather than as failures.
+#     deletion-window-days: 7
+#   compartment:
+#     # Delete the target compartment itself once it is empty. Off by default. The
+#     # --delete-compartments flag can only turn this on, never override it back off.
+#     delete: false
+
+# Per-compartment filters. Each compartment resolves its own filter set — a filter written
+# for one compartment never silently applies to another. The reserved `__global__` key
+# applies to every resource type within that compartment.
+#
+# Watch the polarity of dateOlderThan: `value: "24h"` protects anything YOUNGER than 24
+# hours. The filter engine computes fieldTime + duration and compares against now, so a
+# resource created an hour ago lands in the future and matches; one created a month ago
+# does not.
+#
+# filters:
+#   ocid1.compartment.oc1..aaaaaaaaexamplesandboxcompartmentexampleexampleexamplex:
+#     filters:
+#       __global__:
+#         - property: "freeform_tags.Persistent"
+#           type: exact
+#           value: "true"
+#         - property: "time-created"
+#           type: dateOlderThan
+#           value: "24h"

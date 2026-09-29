@@ -1,0 +1,136 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - dogsled
+    - errcheck
+    - funlen
+    - goconst
+    - gocritic
+    - gocyclo
+    - goprintffuncname
+    - gosec
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - nilnil
+    - noctx
+    - nolintlint
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - whitespace
+  settings:
+    dupl:
+      threshold: 100
+    funlen:
+      lines: 100
+      statements: 50
+    goconst:
+      min-len: 2
+      min-occurrences: 3
+    gocritic:
+      disabled-checks:
+        - dupImport
+        - ifElseChain
+        - octalLiteral
+        - whyNoLint
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+    staticcheck:
+      checks:
+        - "all"
+    gocyclo:
+      min-complexity: 15
+    lll:
+      line-length: 140
+    misspell:
+      locale: US
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - funlen
+        path: _test\.go
+      # Stub SDK clients under resources/*_test.go (emitted by cmd/gen-resource's scaffold
+      # template, 04-03-PLAN.md) implement request/response methods whose signature must match
+      # the real OCI SDK client exactly -- request structs passed by value, never a pointer, per
+      # the SDK's own fixed convention. gocritic's hugeParam fires on some of these (any
+      # <Type>Request struct over ~80 bytes) purely because of that external, non-negotiable
+      # shape -- see pkg/scope/tree_test.go's fakeIdentityClient for this project's established
+      # precedent of the same constraint. Scoped narrowly to resources/*_test.go (never
+      # production code) and to the exact hugeParam finding text, not a blanket gocritic
+      # exclusion.
+      - linters:
+          - gocritic
+        path: ^resources/.*_test\.go$
+        text: "hugeParam"
+      # DedicatedVmHost mirrors the OCI Go SDK's own capitalization exactly
+      # (core.DedicatedVmHostSummary, ListDedicatedVmHosts, ...) -- "Vm" not "VM" -- per
+      # 04-04-PLAN.md's must_haves (resources/dedicated_vm_host.go's artifact path and
+      # DedicatedVmHostResourceType constant are both plan-mandated literal strings). staticcheck's
+      # ST1003 initialism check does not know OCI's naming convention differs from Go's; renaming
+      # our own identifiers to "DedicatedVMHost" to satisfy it would diverge from the SDK type
+      # names these identifiers deliberately mirror throughout this file and its test.
+      - linters:
+          - staticcheck
+        path: ^resources/dedicated_vm_host(_test)?\.go$
+        text: "ST1003"
+      # PrivateIp/ReservedPublicIp mirror the OCI Go SDK's own capitalization exactly
+      # (core.PrivateIp, core.PublicIp, ListPrivateIps, DeletePrivateIp, ListPublicIps,
+      # DeletePublicIp, ...) -- "Ip" not "IP" -- per 04-07-PLAN.md's must_haves
+      # (resources/private_ip.go's PrivateIpResourceType and resources/reserved_public_ip.go's
+      # ReservedPublicIpResourceType are both plan-mandated literal strings, and ReservedPublicIp
+      # itself is not a distinct SDK type -- it's core.PublicIp filtered at list time, so its Go
+      # identifier deliberately keeps the SDK's "PublicIp" spelling rather than "PublicIP").
+      # Same rationale as the DedicatedVmHost exclusion directly above.
+      - linters:
+          - staticcheck
+        path: ^resources/(private_ip|reserved_public_ip)(_test)?\.go$
+        text: "ST1003"
+      # DbSystem/MySQLDbSystem mirror the OCI Go SDK's own capitalization exactly
+      # (database.DbSystemSummary, ListDbSystems, TerminateDbSystem, mysql.DbSystemSummary,
+      # mysql.DeleteDbSystemRequest, ...) -- "Db" not "DB" -- per 05-02-PLAN.md's must_haves
+      # (resources/db_system.go's DbSystemResourceType and resources/mysql_db_system.go's
+      # MySQLDbSystemResourceType are both plan-mandated literal strings, chosen specifically to
+      # resolve RES-07's Go-identifier collision between the database and mysql SDK packages).
+      # Same rationale as the DedicatedVmHost/PrivateIp exclusions directly above.
+      - linters:
+          - staticcheck
+        path: ^resources/(db_system|mysql_db_system)(_test)?\.go$
+        text: "ST1003"
+      # database_backup_support.go's dbSystemBackupLister/reportDbSystemBackupResidue/
+      # mysqlDbBackupLister mirror the same OCI Go SDK "Db" (not "DB") capitalization as the
+      # db_system.go/mysql_db_system.go exclusion directly above -- these three helpers are this
+      # wave's shared support file for the same two SDK packages' DB System backup operations.
+      - linters:
+          - staticcheck
+        path: ^resources/database_backup_support(_test)?\.go$
+        text: "ST1003"
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -1,0 +1,188 @@
+version: 2
+
+project_name: oci-nuke
+
+# goreleaser owns the GitHub Release. It creates the Release as a draft, uploads the archives,
+# checksums.txt and the cosign .sig/.pem pairs into that draft, and
+# .github/workflows/goreleaser.yml publishes the draft afterwards with
+# `gh release edit --draft=false --latest`.
+#
+# Draft, then upload, then publish is the order GitHub documents for immutable releases, and
+# this org enforces immutability. Immutability is kept deliberately rather than switched off:
+# it is the property that makes a published release's assets trustworthy, because a release
+# that cannot gain content after publication cannot be quietly re-armed with a different
+# binary later. What it costs is that the Release cannot already exist and be published by the
+# time goreleaser runs -- that is how the v1.0.3 run died, with every asset upload failing on
+# "422 Cannot upload assets to an immutable release" after the binaries, the signatures and
+# the images had all been produced successfully.
+#
+# This therefore only works because release-please no longer creates the Release or the tag:
+# `skip-github-release: "true"` in .github/workflows/release.yml reduces it to maintaining the
+# release PR, and a separate `tag` job in that same file pushes the tag with a GitHub App
+# token. That file and this block are one decision and have to move together -- release-please
+# creating the Release again puts this straight back into the 422.
+#
+# The ghcr.io image below stays a first-class distribution channel alongside the archives, not
+# a fallback for them.
+release:
+  draft: true
+  github:
+    owner: naviteq
+    name: oci-nuke
+
+env:
+  - REGISTRY=ghcr.io
+  - IMAGE=naviteq/oci-nuke
+
+builds:
+  - id: oci-nuke
+    main: ./main.go
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X '{{ .ModulePath }}/pkg/common.Version=v{{ .Version }}'
+      - -X '{{ .ModulePath }}/pkg/common.Commit={{ .Commit }}'
+      - -X '{{ .ModulePath }}/pkg/common.Date={{ .CommitDate }}'
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: oci-nuke
+    ids:
+      - oci-nuke
+    name_template: "{{ .ProjectName }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ .Arm }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+# NOTE: `dockers`/`docker_manifests` are flagged by goreleaser as being phased out in favor of
+# `dockers_v2` (https://goreleaser.com/deprecations#dockers). This is a forward-looking warning,
+# not a validation error, on the pinned goreleaser 2.17.1 -- gcp-nuke, the reference template
+# this file is built from, has not migrated either as of 2026-08-07. Revisit if/when goreleaser
+# removes the legacy blocks.
+dockers:
+  - id: linux-amd64
+    ids:
+      - oci-nuke
+    use: buildx
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile
+    image_templates:
+      - '{{ .Env.REGISTRY }}/{{ .Env.IMAGE }}:v{{ .Version }}-amd64'
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source={{.GitURL}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+  - id: linux-arm64
+    ids:
+      - oci-nuke
+    use: buildx
+    goos: linux
+    goarch: arm64
+    dockerfile: Dockerfile
+    image_templates:
+      - '{{ .Env.REGISTRY }}/{{ .Env.IMAGE }}:v{{ .Version }}-arm64'
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source={{.GitURL}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+
+docker_manifests:
+  - name_template: '{{ .Env.REGISTRY }}/{{ .Env.IMAGE }}:v{{ .Version }}'
+    image_templates:
+      - '{{ .Env.REGISTRY }}/{{ .Env.IMAGE }}:v{{ .Version }}-amd64'
+      - '{{ .Env.REGISTRY }}/{{ .Env.IMAGE }}:v{{ .Version }}-arm64'
+
+# cosign v3 flipped `sign-blob --new-bundle-format` to default true, and that format writes a
+# single .bundle file: it requires --bundle and rejects --output-certificate/--output-signature.
+# This block predates that change and asks for the separate .sig/.pem pair, so on the pinned
+# cosign 3.1.3 the release fails with "must specify --bundle with --new-bundle-format" -- which
+# is exactly how the v1.0.0 run died, after building every archive, leaving a tag with no assets.
+# The flag is therefore stated explicitly rather than left to the default: COSIGN_VERSION in
+# .github/workflows/goreleaser.yml and this block are one decision and have to move together.
+#
+# cosign v3 also defaults --use-signing-config to true, which fetches the Fulcio/Rekor/OIDC
+# service URLs from TUF and then refuses any explicitly-passed URL: "cannot specify service URLs
+# and use signing config". That is a second, independent break from the same version bump, and it
+# is why v1.0.1 failed after v1.0.0's fix landed. Both defaults are now stated explicitly, so this
+# block asks cosign v3 for v2 behaviour in full rather than one flag at a time.
+#
+# Both were checked locally against a real cosign v3 binary before being committed, by passing an
+# invalid --identity-token: that runs flag parsing, signing-config resolution and TUF for real and
+# stops at token retrieval, which distinguishes a configuration error from a credential one.
+#
+# Third break, and the subtlest: cosign v3 renamed the ambient provider `github` to
+# `github-actions`. The valid set is [spiffe, google, github-actions, filesystem,
+# buildkite-agent]. `sign-blob` does not enforce it -- given an unknown name it silently falls
+# back to trying every provider, which is why v1.0.2's archives were signed despite the wrong
+# value. `cosign sign` does enforce it, and v1.0.2 died there with "github is not a valid
+# provider". So the blob half was passing by accident, not by configuration, and a green
+# sign-blob step is not evidence that this value is correct.
+#
+# Migrating properly to the new format (--bundle ${artifact}.bundle, signature:
+# "${artifact}.bundle", drop certificate:) is the forward-looking follow-up. It is deliberately
+# not done here, because it cannot be verified without pushing a tag and each failed release
+# costs another version number.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--new-bundle-format=false"
+      - "--use-signing-config=false"
+      - "--oidc-provider=github-actions"
+      - "--oidc-issuer=https://token.actions.githubusercontent.com"
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+    artifacts: all
+
+# --use-signing-config=false for the same reason as the signs: block above -- `cosign sign` takes
+# the flag too, and rejects the explicit --oidc-issuer below without it. Verified directly rather
+# than assumed: running this exact command on cosign v3 reproduces "cannot specify service URLs
+# and use signing config", and with the flag it gets past configuration and fails only on
+# registry authentication. --new-bundle-format is deliberately NOT set here: registry signing
+# stores verification material in the registry rather than in files, so it needs no --bundle and
+# the v3 default is harmless.
+docker_signs:
+  - artifacts: all
+    cmd: cosign
+    args:
+      - "sign"
+      - "--yes"
+      - "--use-signing-config=false"
+      - "--oidc-provider=github-actions"
+      - "--oidc-issuer=https://token.actions.githubusercontent.com"
+      - "${artifact}"
+
+# No `changelog: disable: true` here, deliberately, and it is not an oversight.
+#
+# release-please owns CHANGELOG.md -- goreleaser must not generate a competing changelog from
+# git subjects. That reason still holds, and it is exactly why
+# .github/workflows/goreleaser.yml extracts this version's section out of CHANGELOG.md and
+# hands it to `goreleaser release --release-notes`. The release body is that section.
+#
+# The trap: `--release-notes` is read *inside* goreleaser's changelog pipe, so disabling the
+# pipe discards the flag instead of erroring on it. goreleaser's own documentation says so --
+# "this will also ignore any changelog files passed via --release-notes, and will render an
+# empty changelog". That is how v1.1.0 shipped: the workflow logged "release notes for 1.1.0
+# taken from CHANGELOG.md", passed the file, and the published release body came out one byte
+# long. A green run proves nothing about the body; check the release itself.
+#
+# When the extraction step finds no section for the tag it omits the flag rather than failing,
+# and goreleaser then generates notes from the commits in range. That fallback is deliberate:
+# generic notes are a nuisance, a release that does not happen costs a version number.

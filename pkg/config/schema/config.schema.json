@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/naviteq/oci-nuke/schema/config.schema.json",
+  "title": "oci-nuke config v1",
+  "type": "object",
+  "required": [
+    "tenancy-id",
+    "regions",
+    "compartment-blocklist"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "tenancy-id": {
+      "type": "string",
+      "pattern": "^ocid1\\.tenancy\\.[a-z0-9.]+$"
+    },
+    "regions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "compartment-blocklist": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^ocid1\\.(compartment|tenancy)\\.[a-z0-9.]+$"
+      },
+      "minItems": 1
+    },
+    "resource-types": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "includes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excludes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "presets": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/preset"
+      }
+    },
+    "filters": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/compartmentFilters"
+      }
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "protect": {
+          "$ref": "#/$defs/protectSettings"
+        },
+        "vault": {
+          "$ref": "#/$defs/vaultSettings"
+        },
+        "compartment": {
+          "$ref": "#/$defs/compartmentSettings"
+        }
+      }
+    },
+    "tenancy-root-types": {
+      "type": "array",
+      "description": "Resource types this run may scan and remove at the tenancy root. Only types OCI permits nowhere else (e.g. DynamicGroup) are meaningful here. Absent or empty means none, which is the default and the behaviour that predates this key. This does not make the tenancy root a target: a --compartment-id naming the tenancy is still refused.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "vaultSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deletion-window-days": {
+          "type": "integer",
+          "minimum": 7,
+          "maximum": 30
+        }
+      }
+    },
+    "compartmentSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "delete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "protectSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min-age": {
+          "type": "string",
+          "pattern": "^([0-9]+(ns|us|\u00b5s|ms|s|m|h))+$"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key",
+              "value"
+            ],
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              },
+              "defined": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "preset": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "filters": {
+          "$ref": "#/$defs/filterMap"
+        }
+      }
+    },
+    "compartmentFilters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "filters": {
+          "$ref": "#/$defs/filterMap"
+        },
+        "presets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "filterMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/filter"
+        }
+      }
+    },
+    "filter": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "property",
+            "type"
+          ],
+          "properties": {
+            "group": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "exact",
+                "glob",
+                "regex",
+                "contains",
+                "dateOlderThan",
+                "dateOlderThanNow",
+                "suffix",
+                "prefix",
+                "In",
+                "NotIn"
+              ]
+            },
+            "property": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "invert": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

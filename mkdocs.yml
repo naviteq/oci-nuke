@@ -1,0 +1,51 @@
+site_name: oci-nuke
+site_description: Delete every resource in an Oracle Cloud Infrastructure compartment subtree.
+repo_url: https://github.com/naviteq/oci-nuke
+repo_name: naviteq/oci-nuke
+edit_uri: edit/main/docs/
+
+# Fail the build on a broken internal link or a page missing from nav. A docs site that
+# silently drops a page is worse than one that refuses to build.
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: {icon: material/brightness-7, name: Switch to dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: {icon: material/brightness-4, name: Switch to light mode}
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc: {permalink: true}
+  - pymdownx.details
+  - pymdownx.superfences
+  # Sections of README.md and CONTRIBUTING.md are included by reference rather than copied.
+  # A copy is wrong the first time either file changes, and nobody notices until a user does.
+  - pymdownx.snippets:
+      base_path: [.]
+      check_paths: true
+
+# Safety before usage is a project constraint, not a preference: a visitor must not be able to
+# reach an install command without having passed the dry-run default and the tenancy gate.
+nav:
+  - Safety model: index.md
+  - What cannot be deleted: limitations.md
+  - Getting started: getting-started.md
+  - Configuration: configuration.md
+  - Resource types: resources/index.md
+  - Contributing: contributing.md
+  - CI identity federation: ci-identity-federation-setup.md
+  - Design decisions:
+      - Build on libnuke: adr/0001-build-on-libnuke.md
+      - Cobra over urfave/cli: adr/0002-cobra-over-urfave-cli.md

@@ -1,0 +1,145 @@
+// Package resources is blank-imported by main.go and pkg/commands/list to register every OCI
+// resource type with libnuke's registry.
+package resources
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/ekristen/libnuke/pkg/registry"
+	"github.com/ekristen/libnuke/pkg/resource"
+	"github.com/ekristen/libnuke/pkg/types"
+	"github.com/oracle/oci-go-sdk/v65/core"
+
+	"github.com/naviteq/oci-nuke/pkg/ocinuke"
+)
+
+// natGatewayClient is the narrow slice of core.VirtualNetworkClient this lister needs -- a
+// hand-written interface so NatGateway is stub-testable with zero network access. Every resource
+// type gets its OWN narrow interface, scoped to exactly the calls it makes.
+type natGatewayClient interface {
+	ListNatGateways(ctx context.Context, req core.ListNatGatewaysRequest) (core.ListNatGatewaysResponse, error)
+	DeleteNatGateway(ctx context.Context, req core.DeleteNatGatewayRequest) (core.DeleteNatGatewayResponse, error)
+}
+
+// NatGatewayResourceType is the registry.Registration.Name for NatGateway.
+const NatGatewayResourceType = "NatGateway"
+
+func init() {
+	ocinuke.Register(&registry.Registration{
+		Name:     NatGatewayResourceType,
+		Scope:    ocinuke.CompartmentScope,
+		Resource: &NatGateway{},
+		Lister:   &natGatewayLister{},
+		// DependsOn is intentionally empty -- declare it on whichever type actually has the
+		// dependency, never on the type depended upon (04-RESEARCH.md Q1).
+	}, ocinuke.CurrentScope, ocinuke.CurrentReporter)
+}
+
+type natGatewayLister struct{}
+
+// List satisfies registry.Lister. The pagination/wrapping logic itself lives in
+// natGatewayList, kept separate so it is unit-testable against a stub client without ever
+// constructing a real VirtualNetwork client.
+func (l *natGatewayLister) List(ctx context.Context, opts interface{}) ([]resource.Resource, error) {
+	o, ok := opts.(*ocinuke.ListerOpts)
+	if !ok {
+		return nil, fmt.Errorf("natGatewayLister.List: unexpected opts type %T", opts)
+	}
+	if err := o.BeforeList(ocinuke.Regional); err != nil {
+		return nil, err
+	}
+
+	client, err := o.Clients.VirtualNetwork(o.Region)
+	if err != nil {
+		return nil, fmt.Errorf("constructing VirtualNetworkClient for %s: %w", o.Region, err)
+	}
+
+	return natGatewayList(ctx, client, o.CompartmentID)
+}
+
+// natGatewayList paginates core.ListNatGateways and wraps every returned item as a NatGateway.
+// Isolated from ocinuke.ListerOpts/pkg/clients.Cache on purpose -- this is what the list test
+// below exercises against a stub, with zero network access.
+func natGatewayList(
+	ctx context.Context,
+	client natGatewayClient,
+	compartmentID string,
+) ([]resource.Resource, error) {
+	var out []resource.Resource
+	req := core.ListNatGatewaysRequest{CompartmentId: &compartmentID}
+	for {
+		resp, err := client.ListNatGateways(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("listing NatGateway in %s: %w", compartmentID, err)
+		}
+		for i := range resp.Items {
+			out = append(out, &NatGateway{client: client, natGateway: resp.Items[i]})
+		}
+		if resp.OpcNextPage == nil {
+			break
+		}
+		req.Page = resp.OpcNextPage
+	}
+	return out, nil
+}
+
+// NatGateway wraps one core.NatGateway.
+type NatGateway struct {
+	client     natGatewayClient
+	natGateway core.NatGateway
+}
+
+// GetCompartmentID satisfies ocinuke.CompartmentScoped -- mandatory, checked by ocinuke.Register
+// at init() time (a missing implementation panics at process start, not at runtime).
+func (r *NatGateway) GetCompartmentID() string { return *r.natGateway.CompartmentId }
+
+// UniqueKey satisfies resource.UniqueKeyGetter (SAFE-09) -- the OCID, never the display name.
+// This is the ONLY safe identity key for a resource that can be recreated with the same name by
+// Terraform drift-reconciliation mid-run (PITFALLS.md Pitfall 5).
+func (r *NatGateway) UniqueKey() string { return *r.natGateway.Id }
+
+// Filter is called from TWO structurally different contexts (04-RESEARCH.md Q2): at scan time a
+// non-nil return means "never attempt removal"; during HandleWait's post-Remove() polling, a
+// non-nil return on a still-listed match means "already handled, converge now." Both meanings
+// are satisfied by the same allow-list-of-"present" check -- any state not explicitly listed
+// here excludes, so a future SDK release adding a new lifecycle-state value fails safe.
+func (r *NatGateway) Filter() error {
+	switch r.natGateway.LifecycleState {
+	case core.NatGatewayLifecycleStateProvisioning, core.NatGatewayLifecycleStateAvailable:
+		return nil
+	default:
+		return fmt.Errorf("NatGateway is %s, not available", r.natGateway.LifecycleState)
+	}
+}
+
+// SafetyTags satisfies ocinuke.SafetyEvaluated, returning this resource's freeform tags,
+// its already-flattened ("<namespace>.<key>") defined tags, and its creation time -- the
+// three values ocinuke.Evaluate needs beyond compartment/resource identity (both already
+// available via GetCompartmentID/UniqueKey). Read by ocinuke's scopedLister at SCAN time,
+// before this resource can ever become a queue.Item -- see pkg/ocinuke/scoped_lister.go's
+// SafetyEvaluated doc comment for why protection moved here from Remove() (04-13 plan/apply
+// divergence fix).
+func (r *NatGateway) SafetyTags() (freeform, defined map[string]string, createdAt time.Time) {
+	x := r.natGateway
+	return x.FreeformTags, flattenDefinedTags(x.DefinedTags), x.TimeCreated.Time
+}
+
+// Remove is a direct delete call -- protect-by-tag/min-age protection is now applied at SCAN
+// time (SafetyTags above), before this resource can ever become a queue.Item, so a protected
+// resource never reaches Remove() at all, in either dry-run or --no-dry-run mode.
+func (r *NatGateway) Remove(ctx context.Context) error {
+	x := r.natGateway
+	_, err := r.client.DeleteNatGateway(ctx, core.DeleteNatGatewayRequest{NatGatewayId: x.Id})
+	return holdOn409(err)
+}
+
+// Properties exposes the filter vocabulary this type supports, built from resources/support.go's
+// shared helper so no resource file hand-duplicates a property-key string literal.
+func (r *NatGateway) Properties() types.Properties {
+	x := r.natGateway
+	return baseProperties(x.Id, x.DisplayName, x.CompartmentId, string(x.LifecycleState), x.TimeCreated, x.FreeformTags, x.DefinedTags).
+		Set(propVcnID, x.VcnId).
+		Set("block_traffic", x.BlockTraffic)
+}

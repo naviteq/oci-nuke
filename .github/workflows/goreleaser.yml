@@ -1,0 +1,192 @@
+name: goreleaser
+
+on:
+  push:
+    tags:
+      - "v*"
+  # The public mirror, naviteq/oci-nuke, cuts its tag with GITHUB_TOKEN, and a tag pushed with
+  # GITHUB_TOKEN triggers no workflow -- so its release.yml calls this one directly, passing the
+  # tag it just pushed. Here the tag push itself is the trigger and `tag` stays empty.
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag to release, with its v prefix.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.26.x'
+  GORELEASER_VERSION: v2.17.1
+  COSIGN_VERSION: v3.1.3
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload archives
+      packages: write # push the image to ghcr.io
+      id-token: write # cosign keyless signing via OIDC
+    env:
+      # Under workflow_call the run belongs to a push to main, so github.ref_name is "main" and
+      # every step below would release the wrong ref. The tag is therefore resolved once, here.
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          fetch-depth: 0
+      # First step after the checkout, deliberately: this costs a second, and the failure it
+      # catches otherwise costs four minutes and a version number.
+      #
+      # Under this org's immutable releases a published Release cannot gain assets. If something
+      # has already published one for this tag, goreleaser still builds every archive, signs
+      # them, pushes the images, and only then fails every single upload with "422 Cannot upload
+      # assets to an immutable release". That is exactly how v1.1.1 shipped: a published,
+      # immutable Release with zero assets, and a red goreleaser run four minutes later.
+      #
+      # The known cause is release-please creating the Release first. .github/workflows/release.yml
+      # passes `skip-github-release: "true"` to naviteq/github-actions' shared
+      # create-release.yaml, but that workflow declared the input and never wired it through to
+      # the action until its v1.53.0 -- so the input was accepted, discarded, and reported
+      # success. Whether goreleaser won came down to which job pushed first: v1.1.0 worked, v1.1.1
+      # did not, three seconds apart.
+      #
+      # This guard is not the fix; the pin bump to v1.53.0 is. It stays afterwards as defence in
+      # depth, because nothing on goreleaser's side announces this condition before it is too
+      # late to do anything about it.
+      - name: refuse to build into an already-published release
+        run: |
+          set -euo pipefail
+
+          # A missing release is the normal case and exits 0. `gh release view` is guarded by an
+          # `if` rather than run bare, because a non-zero exit would otherwise kill the step
+          # under `set -e` and turn "nothing to do" into a failure.
+          if ! is_draft="$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            echo "no release exists for ${RELEASE_TAG} yet; goreleaser will create the draft."
+            exit 0
+          fi
+
+          if [ "${is_draft}" = "false" ]; then
+            echo "::error::a published release already exists for ${RELEASE_TAG}, and this org enforces immutable releases -- its assets can no longer be changed. goreleaser owns the Release here, so something else created this one; check that .github/workflows/release.yml pins a naviteq/github-actions revision at or after v1.53.0, which is where skip-github-release started reaching release-please."
+            exit 1
+          fi
+
+          echo "a draft release already exists for ${RELEASE_TAG}; goreleaser will upload into it."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: setup qemu
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: setup docker buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: login to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # sigstore/cosign-installer and goreleaser/goreleaser-action are not on this
+      # org's Actions allowlist, so both binaries are installed from their upstream
+      # release archives at pinned versions instead.
+      - name: install cosign
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfLo /tmp/cosign \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          curl -sSfLo /tmp/cosign_checksums.txt \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt"
+          EXPECTED=$(grep ' cosign-linux-amd64$' /tmp/cosign_checksums.txt | cut -d' ' -f1)
+          echo "${EXPECTED}  /tmp/cosign" | sha256sum -c -
+          install -m 0755 /tmp/cosign "$HOME/.local/bin/cosign"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cosign" version
+      - name: install goreleaser
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfLo /tmp/goreleaser.tar.gz \
+            "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz"
+          curl -sSfLo /tmp/goreleaser_checksums.txt \
+            "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/checksums.txt"
+          EXPECTED=$(grep ' goreleaser_Linux_x86_64.tar.gz$' /tmp/goreleaser_checksums.txt | cut -d' ' -f1)
+          echo "${EXPECTED}  /tmp/goreleaser.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/goreleaser.tar.gz -C /tmp goreleaser
+          install -m 0755 /tmp/goreleaser "$HOME/.local/bin/goreleaser"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/goreleaser" --version
+      # CHANGELOG.md is maintained by release-please and its headings are `## [1.0.4](...)`
+      # -- no `v` prefix -- while the tag that triggered this run carries one, hence the strip.
+      # A missing or empty section is a warning, not a failure: a release with goreleaser's
+      # generic notes is a nuisance, a release that does not happen costs a version number.
+      - name: extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+
+          if [ ! -f CHANGELOG.md ]; then
+            echo "::warning::CHANGELOG.md not found; goreleaser will generate its own release notes."
+            echo "notes=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Literal prefix matching via index(), not a regex: the version contains dots, and a
+          # regex would let them match any character and pick up a neighbouring section.
+          awk -v ver="${version}" '
+            index($0, "## [" ver "]") == 1 { found = 1; next }
+            found && index($0, "## ") == 1 { exit }
+            found { print }
+          ' CHANGELOG.md > "${notes_file}"
+
+          if [ -s "${notes_file}" ]; then
+            echo "notes=${notes_file}" >> "$GITHUB_OUTPUT"
+            echo "release notes for ${version} taken from CHANGELOG.md"
+          else
+            rm -f "${notes_file}"
+            echo "notes=" >> "$GITHUB_OUTPUT"
+            echo "::warning::no CHANGELOG.md section found for ${version}; goreleaser will generate its own release notes."
+          fi
+      - name: run goreleaser
+        run: |
+          set -euo pipefail
+          if [ -n "${RELEASE_NOTES}" ]; then
+            goreleaser release --clean --release-notes "${RELEASE_NOTES}"
+          else
+            goreleaser release --clean
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NOTES: ${{ steps.notes.outputs.notes }}
+          # Stated rather than left to `git describe`: under workflow_call the run's own ref is
+          # main, and the checkout above is the only thing that says which tag this is.
+          GORELEASER_CURRENT_TAG: ${{ env.RELEASE_TAG }}
+      # goreleaser creates the Release as a draft (`release: draft: true` in .goreleaser.yml)
+      # and uploads the archives, checksums.txt and the cosign .sig/.pem pairs into it. This
+      # step is what makes it visible. Deliberately no `if:` -- plain step ordering means a
+      # failed build leaves an unpublished draft behind rather than publishing an empty release.
+      - name: publish the draft release
+        run: |
+          set -euo pipefail
+          gh release edit "${RELEASE_TAG}" --draft=false --latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # After the release, not before it. By the time goreleaser finishes, the image is already
+  # pushed -- withholding the Release would not unpush it, and it would burn a version number
+  # for archives that are independently signed and fine. A broken image is a loud red run and a
+  # new patch; a withheld release is both of those plus a wasted version. → docs/releasing.md
+  verify-image:
+    needs: release
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/verify-release-image.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}

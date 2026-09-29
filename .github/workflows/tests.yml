@@ -1,0 +1,107 @@
+name: tests
+
+on:
+  pull_request:
+    branches:
+      - main
+
+# Least privilege at the top level; jobs widen only if they must.
+# Also satisfies Checkov CKV2_GHA_1.
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.26.x'
+  # The linter binary version. `.golangci.yml`'s `version: "2"` is the config schema
+  # version, not this -- they move independently. Keep this in step with the version
+  # developers run locally so CI and local results agree.
+  GOLANGCI_LINT_VERSION: v2.12.2
+
+jobs:
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      # golangci/golangci-lint-action is not on this org's Actions allowlist,
+      # so install the binary directly from the project's official installer.
+      - name: install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_LINT_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: golangci-lint run
+        run: golangci-lint run --timeout=10m ./...
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go mod download
+      - run: go test -timeout 60s ./...
+
+  scan-internal-identifiers:
+    name: scan-internal-identifiers
+    # The scanner is not mirrored -- it lists the identifiers it looks for as literals -- so in
+    # the public mirror there is nothing to run. The mirror's tree is scanned instead, in
+    # --strict mode, before it is ever pushed.
+    if: github.repository_owner != 'naviteq'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The scanner walks full commit history (git log --all -p -G...), which needs every
+          # commit present locally. Every other job in this file gets away with the shallow
+          # default because none of them reads history.
+          fetch-depth: 0
+      - name: scanner self-test (gates merges)
+        run: ./tools/scan-internal-identifiers_test.sh
+      # This gates merges. It used to be continue-on-error for two reasons, both now fixed:
+      # the eight identifiers .github/oci-nuke.yaml commits on purpose kept it permanently red
+      # (they are ACCEPTED_VALUES in the scanner now, matched by exact value), and the scan
+      # itself aborted with SIGABRT on 12 of 30 runs by forking a subshell per matched line
+      # (the working-tree pass is a single awk pass now, 0 of 30). → NR-813
+      - name: scan this repository for internal identifiers
+        run: ./tools/scan-internal-identifiers.sh
+
+  # The e2e harness runs on demand against real infrastructure, but its assertion scripts are what
+  # decide whether that run passed -- so they are tested here, on every pull request, with no
+  # network and no OCI account. A harness whose assertions always pass converts "we have never
+  # proved the delete path works" into a green tick that means nothing, and it would take a real
+  # leaked cluster to notice.
+  e2e-harness-scripts:
+    name: e2e harness scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck
+        run: shellcheck -S style test/e2e/harness/*.sh
+      - name: harness self-test
+        run: ./test/e2e/harness/harness_test.sh
+
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o /dev/null ./...

@@ -1,0 +1,61 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# Editor/IDE
+# .idea/
+# .vscode/
+
+# Generated plan artifact. Written to the working directory by default on every run --
+# it is run output, not source, and it can name real resources in a real tenancy.
+oci-nuke-plan.json
+
+# Internal planning artifacts (GSD roadmaps, phase plans, execution summaries,
+# UAT reports, research notes). Deliberately not tracked: they are development
+# process records, not part of the product, and their prose names internal
+# tenancies and compartments. This repository is slated to go public.
+#
+# The directory still exists locally and the tooling still reads and writes it --
+# only the repository stops carrying it. Do not "fix" this by re-adding it.
+.planning/
+
+# goreleaser build output from a local `goreleaser release --snapshot`. Build
+# artifacts, not source.
+dist/
+
+# OpenTofu/Terraform working state for test/e2e/fixture. The lock file IS committed -- it pins
+# the provider version the fixture was validated against.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.tfstate.lock.info
+
+# mkdocs build output
+/site/
+/generate-config-docs
