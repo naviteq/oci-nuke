@@ -190,3 +190,12 @@ jobs:
     uses: ./.github/workflows/verify-release-image.yml
     with:
       tag: ${{ inputs.tag || github.ref_name }}
+
+  # The action installs from the release, so only the published release can prove it works.
+  verify-action:
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/verify-action.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}

@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1] (2026-09-30)
+
+
+### Bug Fixes
+
+* **action:** make the install action Marketplace-ready and test it
+
 ## [2.1.0] (2026-09-29)
 
 

@@ -5,6 +5,8 @@ Infrastructure (OCI) compartment subtree. It targets platform and DevOps enginee
 tear down sandbox, demo, and CI tenancies reliably — the OCI counterpart to `aws-nuke`,
 `azure-nuke`, and `gcp-nuke`.
 
+Documentation: <https://naviteq.github.io/oci-nuke/>. Read the safety model below before anything else.
+
 <!-- --8<-- [start:safety] -->
 ## Safety Model
 

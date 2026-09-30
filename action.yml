@@ -1,12 +1,13 @@
 ---
 name: Install oci-nuke
+# Marketplace caps the description at 125 characters. The cosign .sig/.pem pair is not verified:
+# cosign is absent from GitHub-hosted runners. The description keeps saying so on purpose.
 description: >-
-  Download a released oci-nuke archive, verify its sha256 against that release's
-  own checksums.txt, and put the binary on PATH. The cosign .sig/.pem pair that
-  ships alongside every archive is NOT verified here: cosign is not present on a
-  GitHub-hosted runner and checking the signature would need its own install
-  step. That is a follow-up, and it is stated here so no reader assumes the
-  signatures are being checked when they are not.
+  Install a released oci-nuke binary on PATH, sha256-checked against the release's checksums.txt.
+  Signatures are not verified.
+branding:
+  icon: trash-2
+  color: red
 
 inputs:
   version:

@@ -1,0 +1,162 @@
+name: verify-action
+
+# Runs action.yml the way a consumer does, against a real release, and asserts what it promises:
+# the requested binary on PATH, the outputs, and a refusal for each input it rejects.
+# On a pull request it installs the latest release; after a release, goreleaser.yml calls it
+# with the tag it just published.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - action.yml
+      - .goreleaser.yml
+      - .github/workflows/verify-action.yml
+  # The public mirror runs pull requests from trusted authors only; anyone else's run starts
+  # when a maintainer approves the PR. See the gate on `resolve`.
+  pull_request_review:
+    types:
+      - submitted
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag to install, with its v prefix.
+        required: true
+        type: string
+  # checkov:skip=CKV_GHA_7: the tag only selects which published release to install and check.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to install, with its v prefix (e.g. v2.1.0). Empty means the latest release.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    # In the mirror, a pull request runs only for the maintainer or the mirror bot, or once a
+    # member approves it. Every other job needs this one, so a skip here skips the whole run.
+    # A fork can edit this condition, so the hard boundary is the repository's fork-PR approval
+    # policy; this gate keeps honest PRs from spending runner minutes before review.
+    if: >-
+      (github.event_name != 'pull_request' && github.event_name != 'pull_request_review') ||
+      (github.event_name == 'pull_request' && (github.repository_owner != 'naviteq' ||
+        contains(fromJSON('["DovnarAlexander", "release-naviteq-io[bot]"]'), github.event.pull_request.user.login))) ||
+      (github.event_name == 'pull_request_review' && github.repository_owner == 'naviteq' &&
+        github.event.review.state == 'approved' &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) &&
+        !contains(fromJSON('["DovnarAlexander", "release-naviteq-io[bot]"]'), github.event.pull_request.user.login))
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: resolve the tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName)}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "testing the action against ${tag}"
+
+  install:
+    name: install (${{ matrix.runner }})
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # One runner per archive the release ships: linux/amd64, linux/arm64, darwin/arm64.
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: run the action
+        id: action
+        uses: ./
+        with:
+          version: ${{ needs.resolve.outputs.tag }}
+          token: ${{ github.token }}
+      - name: assert the installed binary and outputs
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          OUT_PATH: ${{ steps.action.outputs.path }}
+          OUT_VERSION: ${{ steps.action.outputs.version }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ -x "${OUT_PATH}" ] || fail "outputs.path '${OUT_PATH}' is not an executable file"
+          on_path="$(command -v oci-nuke)" || fail "oci-nuke is not on PATH"
+          [ "${on_path}" = "${OUT_PATH}" ] || fail "PATH resolves oci-nuke to ${on_path}, not ${OUT_PATH}"
+
+          reported="$(oci-nuke version | head -n 1)"
+          case "${reported}" in
+            "oci-nuke ${TAG} "*) ;;
+            *) fail "oci-nuke version reports '${reported}', expected ${TAG}" ;;
+          esac
+          [ "${reported}" = "${OUT_VERSION}" ] || fail "outputs.version '${OUT_VERSION}' differs from '${reported}'"
+          echo "ok: ${reported}"
+
+  rejects:
+    name: rejects bad input
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: version "latest"
+        id: latest
+        continue-on-error: true
+        uses: ./
+        with:
+          version: latest
+          token: ${{ github.token }}
+      - name: version without the v prefix
+        id: no-prefix
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 1.0.0
+          token: ${{ github.token }}
+      - name: no token
+        id: no-token
+        continue-on-error: true
+        uses: ./
+        with:
+          version: ${{ needs.resolve.outputs.tag }}
+      - name: a tag that was never released
+        id: missing-tag
+        continue-on-error: true
+        uses: ./
+        with:
+          version: v0.0.0
+          token: ${{ github.token }}
+      - name: assert every case failed and nothing was installed
+        env:
+          LATEST: ${{ steps.latest.outcome }}
+          NO_PREFIX: ${{ steps.no-prefix.outcome }}
+          NO_TOKEN: ${{ steps.no-token.outcome }}
+          MISSING_TAG: ${{ steps.missing-tag.outcome }}
+        run: |
+          set -euo pipefail
+          status=0
+          for case in "latest=${LATEST}" "no-prefix=${NO_PREFIX}" "no-token=${NO_TOKEN}" "missing-tag=${MISSING_TAG}"; do
+            if [ "${case#*=}" = "failure" ]; then
+              echo "ok: ${case%%=*} was refused"
+            else
+              echo "::error::${case%%=*}: expected the action to fail, got '${case#*=}'"
+              status=1
+            fi
+          done
+          if command -v oci-nuke >/dev/null 2>&1; then
+            echo "::error::a refused install still left oci-nuke on PATH at $(command -v oci-nuke)"
+            status=1
+          fi
+          exit "${status}"
