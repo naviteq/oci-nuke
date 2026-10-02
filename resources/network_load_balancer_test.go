@@ -8,9 +8,6 @@ import (
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/networkloadbalancer"
-
-	"github.com/naviteq/oci-nuke/pkg/ocinuke"
-	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // stubNetworkLoadBalancerClient implements networkLoadBalancerClient against in-memory data --
@@ -20,6 +17,8 @@ type stubNetworkLoadBalancerClient struct {
 	items   []networkloadbalancer.NetworkLoadBalancerSummary
 	deleted []string
 	listErr error
+	getResp networkloadbalancer.GetNetworkLoadBalancerResponse
+	getErr  error
 
 	backendSets      []networkloadbalancer.BackendSetSummary
 	backendSetsCalls int
@@ -46,6 +45,13 @@ func (s *stubNetworkLoadBalancerClient) DeleteNetworkLoadBalancer(
 ) (networkloadbalancer.DeleteNetworkLoadBalancerResponse, error) {
 	s.deleted = append(s.deleted, *req.NetworkLoadBalancerId)
 	return networkloadbalancer.DeleteNetworkLoadBalancerResponse{}, nil
+}
+
+func (s *stubNetworkLoadBalancerClient) GetNetworkLoadBalancer(
+	_ context.Context,
+	_ networkloadbalancer.GetNetworkLoadBalancerRequest,
+) (networkloadbalancer.GetNetworkLoadBalancerResponse, error) {
+	return s.getResp, s.getErr
 }
 
 func (s *stubNetworkLoadBalancerClient) ListBackendSets(
@@ -84,10 +90,9 @@ func TestNetworkLoadBalancerLister_List(t *testing.T) {
 }
 
 // TestNetworkLoadBalancer_Filter is table-driven over every
-// networkloadbalancer.LifecycleStateEnum value -- CREATING/UPDATING/ACTIVE must return nil
+// networkloadbalancer.LifecycleStateEnum value -- CREATING/UPDATING/ACTIVE/FAILED must return nil
 // (present), DELETING/DELETED must both return non-nil (excluded, the hang-trap regression
-// case), and FAILED must also return non-nil (excluded, and additionally reported -- see
-// TestNetworkLoadBalancer_Filter_FailedReportsLeftover below).
+// case). FAILED is present so a FAILED network load balancer still gets deleted.
 func TestNetworkLoadBalancer_Filter(t *testing.T) {
 	tests := []struct {
 		state   networkloadbalancer.LifecycleStateEnum
@@ -98,7 +103,7 @@ func TestNetworkLoadBalancer_Filter(t *testing.T) {
 		{networkloadbalancer.LifecycleStateActive, true},
 		{networkloadbalancer.LifecycleStateDeleting, false},
 		{networkloadbalancer.LifecycleStateDeleted, false},
-		{networkloadbalancer.LifecycleStateFailed, false},
+		{networkloadbalancer.LifecycleStateFailed, true},
 	}
 
 	id := testResourceOCID
@@ -115,44 +120,6 @@ func TestNetworkLoadBalancer_Filter(t *testing.T) {
 		if !tc.present && err == nil {
 			t.Errorf("Filter() with excluded state %s = nil, want non-nil (hang-trap regression)", tc.state)
 		}
-	}
-}
-
-// TestNetworkLoadBalancer_Filter_FailedReportsLeftover proves a FAILED network load balancer is
-// excluded via ocinuke.ReportLeftover(scope.ReasonAPIError) before Filter() returns its
-// exclusion error -- FAILED surfaces as a labeled leftover, never a silent scan-time drop.
-func TestNetworkLoadBalancer_Filter_FailedReportsLeftover(t *testing.T) {
-	var got []*scope.SkipEvent
-	restore := ocinuke.SetRunContext(func(string) bool { return true }, func(evt *scope.SkipEvent) {
-		got = append(got, evt)
-	})
-	defer restore()
-
-	id := testResourceOCID
-	compartmentID := testCompartmentOCID
-	r := &NetworkLoadBalancer{}
-	r.nlb.Id = &id
-	r.nlb.CompartmentId = &compartmentID
-	r.nlb.LifecycleState = networkloadbalancer.LifecycleStateFailed
-
-	if err := r.Filter(); err == nil {
-		t.Fatal("Filter() with FAILED state = nil, want non-nil")
-	}
-
-	if len(got) != 1 {
-		t.Fatalf("ReportLeftover called %d times, want 1", len(got))
-	}
-	if got[0].Reason != scope.ReasonAPIError {
-		t.Errorf("SkipEvent.Reason = %q, want %q", got[0].Reason, scope.ReasonAPIError)
-	}
-	if got[0].ResourceType != NetworkLoadBalancerResourceType {
-		t.Errorf("SkipEvent.ResourceType = %q, want %q", got[0].ResourceType, NetworkLoadBalancerResourceType)
-	}
-	if got[0].ResourceID != id {
-		t.Errorf("SkipEvent.ResourceID = %q, want %q", got[0].ResourceID, id)
-	}
-	if got[0].CompartmentID != compartmentID {
-		t.Errorf("SkipEvent.CompartmentID = %q, want %q", got[0].CompartmentID, compartmentID)
 	}
 }
 

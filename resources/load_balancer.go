@@ -15,7 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/naviteq/oci-nuke/pkg/ocinuke"
-	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // loadBalancerClient is the narrow slice of loadbalancer.LoadBalancerClient this lister needs --
@@ -29,6 +28,7 @@ import (
 type loadBalancerClient interface {
 	ListLoadBalancers(ctx context.Context, req loadbalancer.ListLoadBalancersRequest) (loadbalancer.ListLoadBalancersResponse, error)
 	DeleteLoadBalancer(ctx context.Context, req loadbalancer.DeleteLoadBalancerRequest) (loadbalancer.DeleteLoadBalancerResponse, error)
+	GetLoadBalancer(ctx context.Context, req loadbalancer.GetLoadBalancerRequest) (loadbalancer.GetLoadBalancerResponse, error)
 	ListBackendSets(ctx context.Context, req loadbalancer.ListBackendSetsRequest) (loadbalancer.ListBackendSetsResponse, error)
 	ListCertificates(ctx context.Context, req loadbalancer.ListCertificatesRequest) (loadbalancer.ListCertificatesResponse, error)
 }
@@ -103,6 +103,7 @@ func loadBalancerList(
 // Service is listed and deleted exactly like one created any other way (RES-11). This is proven by
 // `resources_test/oke_independent_enumeration_test.go`'s `TestOKEIndependentEnumeration`.
 type LoadBalancer struct {
+	failedDeletes
 	client loadBalancerClient
 	lb     loadbalancer.LoadBalancer
 }
@@ -123,23 +124,15 @@ func (r *LoadBalancer) UniqueKey() string { return *r.lb.Id }
 // excludes, so a future SDK release adding a new lifecycle-state value fails safe.
 //
 // loadbalancer.LoadBalancerLifecycleStateEnum (verified this session, loadbalancer/load_balancer.go)
-// has exactly five values: CREATING, FAILED, ACTIVE, DELETING, DELETED. FAILED is a genuine error
-// state neither cleanly "present" nor "gone" -- excluded like DELETING/DELETED, but additionally
-// reported via ocinuke.ReportLeftover(ReasonAPIError) before returning the exclusion error,
-// matching this wave's established FAULTY/FAILED convention (Plans 04-04/04-05).
+// has exactly five values: CREATING, FAILED, ACTIVE, DELETING, DELETED. FAILED is present: a
+// FAILED load balancer still exists and DeleteLoadBalancer accepts it. A delete that ends in FAILED
+// is caught by HandleWait below, not here -- see resources/failed_delete.go.
 func (r *LoadBalancer) Filter() error {
 	switch r.lb.LifecycleState {
-	case loadbalancer.LoadBalancerLifecycleStateCreating, loadbalancer.LoadBalancerLifecycleStateActive:
+	case loadbalancer.LoadBalancerLifecycleStateCreating,
+		loadbalancer.LoadBalancerLifecycleStateActive,
+		loadbalancer.LoadBalancerLifecycleStateFailed:
 		return nil
-	case loadbalancer.LoadBalancerLifecycleStateFailed:
-		ocinuke.ReportLeftover(ocinuke.CurrentReporter, &scope.SkipEvent{
-			Reason:        scope.ReasonAPIError,
-			ResourceType:  LoadBalancerResourceType,
-			ResourceID:    *r.lb.Id,
-			CompartmentID: *r.lb.CompartmentId,
-			Detail:        "load balancer is FAILED",
-		})
-		return fmt.Errorf("LoadBalancer is %s, not available", r.lb.LifecycleState)
 	default:
 		return fmt.Errorf("LoadBalancer is %s, not available", r.lb.LifecycleState)
 	}
@@ -164,11 +157,32 @@ func (r *LoadBalancer) SafetyTags() (freeform, defined map[string]string, create
 // DeleteLoadBalancer is the ONLY mutating call this type ever issues; ListBackendSets/
 // ListCertificates are read-only and are called ONLY from Properties() below, never from here
 // -- this is the "not independently deleted" half of this plan's objective, proven by
-// TestLoadBalancer_Remove_NeverCallsBackendSetOrCertificateLister.
+// TestLoadBalancer_Remove_NeverCallsBackendSetOrCertificateLister. It stops calling it, and holds,
+// once maxFailedDeletes deletes have ended in FAILED (resources/failed_delete.go).
 func (r *LoadBalancer) Remove(ctx context.Context) error {
+	if refused := r.refuse(); refused != nil {
+		return refused
+	}
 	x := r.lb
 	_, err := r.client.DeleteLoadBalancer(ctx, loadbalancer.DeleteLoadBalancerRequest{LoadBalancerId: x.Id})
+	r.issued(err)
 	return holdOn409(err)
+}
+
+// HandleWait satisfies resource.HandleWaitHook. It reads the load balancer back after the delete
+// and reports a delete that ended in FAILED -- see resources/failed_delete.go.
+func (r *LoadBalancer) HandleWait(ctx context.Context) error {
+	resp, err := r.client.GetLoadBalancer(ctx, loadbalancer.GetLoadBalancerRequest{LoadBalancerId: r.lb.Id})
+	outcome := deleteNotStarted
+	switch resp.LifecycleState {
+	case loadbalancer.LoadBalancerLifecycleStateDeleting:
+		outcome = deleteInFlight
+	case loadbalancer.LoadBalancerLifecycleStateDeleted:
+		outcome = deleteGone
+	case loadbalancer.LoadBalancerLifecycleStateFailed:
+		outcome = deleteFailed
+	}
+	return r.wait("load balancer", outcome, "", err)
 }
 
 // Properties exposes the filter vocabulary this type supports, built from resources/support.go's

@@ -8,9 +8,6 @@ import (
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/loadbalancer"
-
-	"github.com/naviteq/oci-nuke/pkg/ocinuke"
-	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // stubLoadBalancerClient implements loadBalancerClient against in-memory data -- zero network
@@ -19,6 +16,11 @@ type stubLoadBalancerClient struct {
 	items   []loadbalancer.LoadBalancer
 	deleted []string
 	listErr error
+
+	// deleteFn and getFn, when set, script DeleteLoadBalancer's error and GetLoadBalancer's
+	// answer -- resources/failed_delete_test.go drives a whole delete lifecycle through them.
+	deleteFn func() error
+	getFn    func() (loadbalancer.GetLoadBalancerResponse, error)
 
 	backendSets       []loadbalancer.BackendSet
 	certificates      []loadbalancer.Certificate
@@ -44,7 +46,20 @@ func (s *stubLoadBalancerClient) DeleteLoadBalancer(
 	req loadbalancer.DeleteLoadBalancerRequest,
 ) (loadbalancer.DeleteLoadBalancerResponse, error) {
 	s.deleted = append(s.deleted, *req.LoadBalancerId)
+	if s.deleteFn != nil {
+		return loadbalancer.DeleteLoadBalancerResponse{}, s.deleteFn()
+	}
 	return loadbalancer.DeleteLoadBalancerResponse{}, nil
+}
+
+func (s *stubLoadBalancerClient) GetLoadBalancer(
+	_ context.Context,
+	_ loadbalancer.GetLoadBalancerRequest,
+) (loadbalancer.GetLoadBalancerResponse, error) {
+	if s.getFn != nil {
+		return s.getFn()
+	}
+	return loadbalancer.GetLoadBalancerResponse{}, nil
 }
 
 func (s *stubLoadBalancerClient) ListBackendSets(
@@ -88,9 +103,9 @@ func TestLoadBalancerLister_List(t *testing.T) {
 }
 
 // TestLoadBalance_Filter is table-driven over every loadbalancer.LoadBalancerLifecycleStateEnum
-// value -- CREATING/ACTIVE must return nil (present), DELETING/DELETED must both return non-nil
-// (excluded, the hang-trap regression case), and FAILED must also return non-nil (excluded, and
-// additionally reported -- see TestLoadBalancer_Filter_FailedReportsLeftover below).
+// value -- CREATING/ACTIVE/FAILED must return nil (present), DELETING/DELETED must both return
+// non-nil (excluded, the hang-trap regression case). FAILED is present so a FAILED load balancer
+// still gets deleted.
 func TestLoadBalancer_Filter(t *testing.T) {
 	tests := []struct {
 		state   loadbalancer.LoadBalancerLifecycleStateEnum
@@ -100,7 +115,7 @@ func TestLoadBalancer_Filter(t *testing.T) {
 		{loadbalancer.LoadBalancerLifecycleStateActive, true},
 		{loadbalancer.LoadBalancerLifecycleStateDeleting, false},
 		{loadbalancer.LoadBalancerLifecycleStateDeleted, false},
-		{loadbalancer.LoadBalancerLifecycleStateFailed, false},
+		{loadbalancer.LoadBalancerLifecycleStateFailed, true},
 	}
 
 	id := testResourceOCID
@@ -117,44 +132,6 @@ func TestLoadBalancer_Filter(t *testing.T) {
 		if !tc.present && err == nil {
 			t.Errorf("Filter() with excluded state %s = nil, want non-nil (hang-trap regression)", tc.state)
 		}
-	}
-}
-
-// TestLoadBalancer_Filter_FailedReportsLeftover proves a FAILED load balancer is excluded via
-// ocinuke.ReportLeftover(scope.ReasonAPIError) before Filter() returns its exclusion error --
-// FAILED surfaces as a labeled leftover, never a silent scan-time drop.
-func TestLoadBalancer_Filter_FailedReportsLeftover(t *testing.T) {
-	var got []*scope.SkipEvent
-	restore := ocinuke.SetRunContext(func(string) bool { return true }, func(evt *scope.SkipEvent) {
-		got = append(got, evt)
-	})
-	defer restore()
-
-	id := testResourceOCID
-	compartmentID := testCompartmentOCID
-	r := &LoadBalancer{}
-	r.lb.Id = &id
-	r.lb.CompartmentId = &compartmentID
-	r.lb.LifecycleState = loadbalancer.LoadBalancerLifecycleStateFailed
-
-	if err := r.Filter(); err == nil {
-		t.Fatal("Filter() with FAILED state = nil, want non-nil")
-	}
-
-	if len(got) != 1 {
-		t.Fatalf("ReportLeftover called %d times, want 1", len(got))
-	}
-	if got[0].Reason != scope.ReasonAPIError {
-		t.Errorf("SkipEvent.Reason = %q, want %q", got[0].Reason, scope.ReasonAPIError)
-	}
-	if got[0].ResourceType != LoadBalancerResourceType {
-		t.Errorf("SkipEvent.ResourceType = %q, want %q", got[0].ResourceType, LoadBalancerResourceType)
-	}
-	if got[0].ResourceID != id {
-		t.Errorf("SkipEvent.ResourceID = %q, want %q", got[0].ResourceID, id)
-	}
-	if got[0].CompartmentID != compartmentID {
-		t.Errorf("SkipEvent.CompartmentID = %q, want %q", got[0].CompartmentID, compartmentID)
 	}
 }
 

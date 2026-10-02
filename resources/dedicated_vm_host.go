@@ -15,7 +15,6 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/core"
 
 	"github.com/naviteq/oci-nuke/pkg/ocinuke"
-	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // dedicatedVmHostClient is the narrow slice of core's client this lister needs -- a
@@ -24,6 +23,7 @@ import (
 type dedicatedVmHostClient interface {
 	ListDedicatedVmHosts(ctx context.Context, req core.ListDedicatedVmHostsRequest) (core.ListDedicatedVmHostsResponse, error)
 	DeleteDedicatedVmHost(ctx context.Context, req core.DeleteDedicatedVmHostRequest) (core.DeleteDedicatedVmHostResponse, error)
+	GetDedicatedVmHost(ctx context.Context, req core.GetDedicatedVmHostRequest) (core.GetDedicatedVmHostResponse, error)
 }
 
 // DedicatedVmHostResourceType is the registry.Registration.Name for DedicatedVmHost.
@@ -90,6 +90,7 @@ func dedicatedVmHostList(
 
 // DedicatedVmHost wraps one core.DedicatedVmHostSummary.
 type DedicatedVmHost struct {
+	failedDeletes
 	client          dedicatedVmHostClient
 	dedicatedVmHost core.DedicatedVmHostSummary
 }
@@ -109,26 +110,16 @@ func (r *DedicatedVmHost) UniqueKey() string { return *r.dedicatedVmHost.Id }
 // are satisfied by the same allow-list-of-"present" check -- any state not explicitly listed
 // here excludes, so a future SDK release adding a new lifecycle-state value fails safe.
 //
-// FAILED is a genuine error state OCI itself cannot resolve -- neither cleanly "present" nor
-// "gone" (04-RESEARCH.md Q2's FAULTY/FAILED note). It is excluded like DELETING/DELETED, but
-// additionally reported via ocinuke.ReportLeftover(ReasonAPIError) before returning the
-// exclusion error, so a FAILED host surfaces as a labeled leftover rather than a silent scan-time
-// drop -- the one place in this plan's five types where Filter()'s exclusion branch also reports.
+// FAILED is present: OCI never moves a host out of FAILED on its own, but DeleteDedicatedVmHost
+// accepts it. A delete that ends in FAILED is caught by HandleWait below, not here -- see
+// resources/failed_delete.go.
 func (r *DedicatedVmHost) Filter() error {
 	switch r.dedicatedVmHost.LifecycleState {
 	case core.DedicatedVmHostSummaryLifecycleStateCreating,
 		core.DedicatedVmHostSummaryLifecycleStateActive,
-		core.DedicatedVmHostSummaryLifecycleStateUpdating:
+		core.DedicatedVmHostSummaryLifecycleStateUpdating,
+		core.DedicatedVmHostSummaryLifecycleStateFailed:
 		return nil
-	case core.DedicatedVmHostSummaryLifecycleStateFailed:
-		ocinuke.ReportLeftover(ocinuke.CurrentReporter, &scope.SkipEvent{
-			Reason:        scope.ReasonAPIError,
-			ResourceType:  DedicatedVmHostResourceType,
-			ResourceID:    *r.dedicatedVmHost.Id,
-			CompartmentID: *r.dedicatedVmHost.CompartmentId,
-			Detail:        "dedicated VM host is FAILED",
-		})
-		return fmt.Errorf("DedicatedVmHost is %s, not available", r.dedicatedVmHost.LifecycleState)
 	default:
 		return fmt.Errorf("DedicatedVmHost is %s, not available", r.dedicatedVmHost.LifecycleState)
 	}
@@ -156,11 +147,33 @@ func (r *DedicatedVmHost) SafetyTags() (freeform, defined map[string]string, cre
 
 // Remove is a direct delete call -- protect-by-tag/min-age protection is now applied at SCAN
 // time (SafetyTags above), before this resource can ever become a queue.Item, so a protected
-// resource never reaches Remove() at all, in either dry-run or --no-dry-run mode.
+// resource never reaches Remove() at all, in either dry-run or --no-dry-run mode. It stops
+// deleting once maxFailedDeletes deletes have ended in FAILED (resources/failed_delete.go).
 func (r *DedicatedVmHost) Remove(ctx context.Context) error {
+	if refused := r.refuse(); refused != nil {
+		return refused
+	}
 	x := r.dedicatedVmHost
 	_, err := r.client.DeleteDedicatedVmHost(ctx, core.DeleteDedicatedVmHostRequest{DedicatedVmHostId: x.Id})
+	r.issued(err)
 	return holdOn409(err)
+}
+
+// HandleWait satisfies resource.HandleWaitHook. It reads the host back after the delete and
+// reports a delete that ended in FAILED -- see resources/failed_delete.go. The SDK's
+// DedicatedVmHost carries no lifecycleDetails, so the message names the state only.
+func (r *DedicatedVmHost) HandleWait(ctx context.Context) error {
+	resp, err := r.client.GetDedicatedVmHost(ctx, core.GetDedicatedVmHostRequest{DedicatedVmHostId: r.dedicatedVmHost.Id})
+	outcome := deleteNotStarted
+	switch resp.LifecycleState {
+	case core.DedicatedVmHostLifecycleStateDeleting:
+		outcome = deleteInFlight
+	case core.DedicatedVmHostLifecycleStateDeleted:
+		outcome = deleteGone
+	case core.DedicatedVmHostLifecycleStateFailed:
+		outcome = deleteFailed
+	}
+	return r.wait("dedicated VM host", outcome, "", err)
 }
 
 // Properties exposes the filter vocabulary this type supports, built from resources/support.go's

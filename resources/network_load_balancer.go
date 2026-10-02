@@ -15,7 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/naviteq/oci-nuke/pkg/ocinuke"
-	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // networkLoadBalancerClient is the narrow slice of
@@ -34,6 +33,9 @@ type networkLoadBalancerClient interface {
 	DeleteNetworkLoadBalancer(
 		ctx context.Context, req networkloadbalancer.DeleteNetworkLoadBalancerRequest,
 	) (networkloadbalancer.DeleteNetworkLoadBalancerResponse, error)
+	GetNetworkLoadBalancer(
+		ctx context.Context, req networkloadbalancer.GetNetworkLoadBalancerRequest,
+	) (networkloadbalancer.GetNetworkLoadBalancerResponse, error)
 	ListBackendSets(
 		ctx context.Context, req networkloadbalancer.ListBackendSetsRequest,
 	) (networkloadbalancer.ListBackendSetsResponse, error)
@@ -119,6 +121,7 @@ func networkLoadBalancerList(
 // listed and deleted exactly like one created any other way (RES-11). This is proven by
 // `resources_test/oke_independent_enumeration_test.go`'s `TestOKEIndependentEnumeration`.
 type NetworkLoadBalancer struct {
+	failedDeletes
 	client networkLoadBalancerClient
 	nlb    networkloadbalancer.NetworkLoadBalancerSummary
 }
@@ -141,25 +144,16 @@ func (r *NetworkLoadBalancer) UniqueKey() string { return *r.nlb.Id }
 // networkloadbalancer.LifecycleStateEnum (verified this session, networkloadbalancer/
 // lifecycle_state.go -- a package-shared type, distinct from Task 1's per-service
 // LoadBalancerLifecycleStateEnum) has exactly six values: CREATING, UPDATING, ACTIVE, DELETING,
-// DELETED, FAILED. FAILED is a genuine error state neither cleanly "present" nor "gone" --
-// excluded like DELETING/DELETED, but additionally reported via
-// ocinuke.ReportLeftover(ReasonAPIError) before returning the exclusion error, matching Task 1's
-// LoadBalancer and this wave's established FAULTY/FAILED convention.
+// DELETED, FAILED. FAILED is present: a FAILED network load balancer still exists and
+// DeleteNetworkLoadBalancer accepts it. A delete that ends in FAILED is caught by HandleWait
+// below, not here -- see resources/failed_delete.go.
 func (r *NetworkLoadBalancer) Filter() error {
 	switch r.nlb.LifecycleState {
 	case networkloadbalancer.LifecycleStateCreating,
 		networkloadbalancer.LifecycleStateUpdating,
-		networkloadbalancer.LifecycleStateActive:
+		networkloadbalancer.LifecycleStateActive,
+		networkloadbalancer.LifecycleStateFailed:
 		return nil
-	case networkloadbalancer.LifecycleStateFailed:
-		ocinuke.ReportLeftover(ocinuke.CurrentReporter, &scope.SkipEvent{
-			Reason:        scope.ReasonAPIError,
-			ResourceType:  NetworkLoadBalancerResourceType,
-			ResourceID:    *r.nlb.Id,
-			CompartmentID: *r.nlb.CompartmentId,
-			Detail:        "network load balancer is FAILED",
-		})
-		return fmt.Errorf("NetworkLoadBalancer is %s, not available", r.nlb.LifecycleState)
 	default:
 		return fmt.Errorf("NetworkLoadBalancer is %s, not available", r.nlb.LifecycleState)
 	}
@@ -184,13 +178,36 @@ func (r *NetworkLoadBalancer) SafetyTags() (freeform, defined map[string]string,
 // DeleteNetworkLoadBalancer is the ONLY mutating call this type ever issues; ListBackendSets
 // is read-only and is called ONLY from Properties() below, never from here -- mirroring Task
 // 1's "not independently deleted" discipline, proven by
-// TestNetworkLoadBalancer_Remove_NeverCallsBackendSetLister.
+// TestNetworkLoadBalancer_Remove_NeverCallsBackendSetLister. It stops calling it, and holds,
+// once maxFailedDeletes deletes have ended in FAILED (resources/failed_delete.go).
 func (r *NetworkLoadBalancer) Remove(ctx context.Context) error {
+	if refused := r.refuse(); refused != nil {
+		return refused
+	}
 	x := r.nlb
 	_, err := r.client.DeleteNetworkLoadBalancer(
 		ctx, networkloadbalancer.DeleteNetworkLoadBalancerRequest{NetworkLoadBalancerId: x.Id},
 	)
+	r.issued(err)
 	return holdOn409(err)
+}
+
+// HandleWait satisfies resource.HandleWaitHook. It reads the network load balancer back after
+// the delete and reports a delete that ended in FAILED -- see resources/failed_delete.go.
+func (r *NetworkLoadBalancer) HandleWait(ctx context.Context) error {
+	resp, err := r.client.GetNetworkLoadBalancer(
+		ctx, networkloadbalancer.GetNetworkLoadBalancerRequest{NetworkLoadBalancerId: r.nlb.Id},
+	)
+	outcome := deleteNotStarted
+	switch resp.LifecycleState {
+	case networkloadbalancer.LifecycleStateDeleting:
+		outcome = deleteInFlight
+	case networkloadbalancer.LifecycleStateDeleted:
+		outcome = deleteGone
+	case networkloadbalancer.LifecycleStateFailed:
+		outcome = deleteFailed
+	}
+	return r.wait("network load balancer", outcome, safeDeref(resp.LifecycleDetails), err)
 }
 
 // Properties exposes the filter vocabulary this type supports, built from resources/support.go's

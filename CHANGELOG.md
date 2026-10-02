@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.2] (2026-10-02)
+
+
+### Bug Fixes
+
+* retry a delete that ends in FAILED instead of reporting it removed
+
 ## [2.1.1] (2026-09-30)
 
 

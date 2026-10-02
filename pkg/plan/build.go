@@ -115,8 +115,8 @@ func resourceID(item *queue.Item) string {
 //     the right word.
 //   - A StateFiltered match is converted IN PLACE to StateSkipped (Reason/Detail set from the
 //     SkipEvent), never left as a second, separate entry. This is 06-REVIEW.md WR-01: some
-//     Filter() implementations (Compartment's blocklisted-descendant branch,
-//     LoadBalancer/NetworkLoadBalancer's FAILED-state branch) both return a non-nil error --
+//     Filter() implementations (Compartment's blocklisted-descendant branch, the block storage
+//     types' FAULTY-state branch) both return a non-nil error --
 //     which alone would route the queue item to a generic, reason-less StateFiltered entry -- AND
 //     call ocinuke.ReportLeftover with a specific scope.SkipEvent for the exact same resource.
 //     Before this fix, mergeSkipEvent only ever matched StateLeftover entries, so that SkipEvent
