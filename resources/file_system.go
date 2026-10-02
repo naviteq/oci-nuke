@@ -13,7 +13,6 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/filestorage"
 
 	"github.com/naviteq/oci-nuke/pkg/ocinuke"
-	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // fileSystemClient is the narrow slice this lister needs: availabilityDomainClient's
@@ -25,6 +24,7 @@ type fileSystemClient interface {
 	availabilityDomainClient
 	ListFileSystems(ctx context.Context, req filestorage.ListFileSystemsRequest) (filestorage.ListFileSystemsResponse, error)
 	DeleteFileSystem(ctx context.Context, req filestorage.DeleteFileSystemRequest) (filestorage.DeleteFileSystemResponse, error)
+	GetFileSystem(ctx context.Context, req filestorage.GetFileSystemRequest) (filestorage.GetFileSystemResponse, error)
 }
 
 // FileSystemResourceType is the registry.Registration.Name for FileSystem.
@@ -110,6 +110,7 @@ func fileSystemList(
 
 // FileSystem wraps one filestorage.FileSystemSummary.
 type FileSystem struct {
+	failedDeletes
 	client fileSystemClient
 	fs     filestorage.FileSystemSummary
 }
@@ -128,25 +129,15 @@ func (r *FileSystem) UniqueKey() string { return *r.fs.Id }
 // filestorage.FileSystemSummaryLifecycleStateEnum (verified this session,
 // filestorage/file_system_summary.go) has exactly six values: CREATING, ACTIVE, UPDATING,
 // DELETING, DELETED, FAILED -- the identical value set to MountTarget's own enum.
-// CREATING/ACTIVE/UPDATING are present; DELETING/DELETED are excluded (going/gone, the hang-trap
-// defense). FAILED is excluded like DELETING/DELETED, but additionally reported via
-// ocinuke.ReportLeftover(ReasonAPIError) before returning the exclusion error, mirroring
-// MountTarget's own FAILED handling.
+// DELETING/DELETED are excluded (going/gone, the hang-trap defense). FAILED is present, for the
+// same reason as MountTarget's: the file system still exists and DeleteFileSystem accepts it.
 func (r *FileSystem) Filter() error {
 	switch r.fs.LifecycleState {
 	case filestorage.FileSystemSummaryLifecycleStateCreating,
 		filestorage.FileSystemSummaryLifecycleStateActive,
-		filestorage.FileSystemSummaryLifecycleStateUpdating:
+		filestorage.FileSystemSummaryLifecycleStateUpdating,
+		filestorage.FileSystemSummaryLifecycleStateFailed:
 		return nil
-	case filestorage.FileSystemSummaryLifecycleStateFailed:
-		ocinuke.ReportLeftover(ocinuke.CurrentReporter, &scope.SkipEvent{
-			Reason:        scope.ReasonAPIError,
-			ResourceType:  FileSystemResourceType,
-			ResourceID:    *r.fs.Id,
-			CompartmentID: *r.fs.CompartmentId,
-			Detail:        "file system is FAILED",
-		})
-		return fmt.Errorf("FileSystem is %s, not available", r.fs.LifecycleState)
 	default:
 		return fmt.Errorf("FileSystem is %s, not available", r.fs.LifecycleState)
 	}
@@ -170,11 +161,32 @@ func (r *FileSystem) SafetyTags() (freeform, defined map[string]string, createdA
 //
 // By the time this call fires, WaitOnDependencies has already ensured every Snapshot/Export
 // referencing this file system has finished or permanently failed (this type's own DependsOn
-// above).
+// above). It stops deleting once maxFailedDeletes deletes have ended in FAILED
+// (resources/failed_delete.go).
 func (r *FileSystem) Remove(ctx context.Context) error {
+	if refused := r.refuse(); refused != nil {
+		return refused
+	}
 	x := r.fs
 	_, err := r.client.DeleteFileSystem(ctx, filestorage.DeleteFileSystemRequest{FileSystemId: x.Id})
+	r.issued(err)
 	return holdOn409(err)
+}
+
+// HandleWait satisfies resource.HandleWaitHook. It reads the file system back after the delete
+// and reports a delete that ended in FAILED -- see resources/failed_delete.go.
+func (r *FileSystem) HandleWait(ctx context.Context) error {
+	resp, err := r.client.GetFileSystem(ctx, filestorage.GetFileSystemRequest{FileSystemId: r.fs.Id})
+	outcome := deleteNotStarted
+	switch resp.LifecycleState {
+	case filestorage.FileSystemLifecycleStateDeleting:
+		outcome = deleteInFlight
+	case filestorage.FileSystemLifecycleStateDeleted:
+		outcome = deleteGone
+	case filestorage.FileSystemLifecycleStateFailed:
+		outcome = deleteFailed
+	}
+	return r.wait("file system", outcome, safeDeref(resp.LifecycleDetails), err)
 }
 
 // Properties exposes the filter vocabulary this type supports, built from resources/support.go's

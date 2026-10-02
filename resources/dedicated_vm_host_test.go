@@ -7,9 +7,6 @@ import (
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/core"
-
-	"github.com/naviteq/oci-nuke/pkg/ocinuke"
-	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // stubDedicatedVmHostClient implements dedicatedVmHostClient against in-memory data -- zero network
@@ -18,6 +15,8 @@ type stubDedicatedVmHostClient struct {
 	items   []core.DedicatedVmHostSummary
 	deleted []string
 	listErr error
+	getResp core.GetDedicatedVmHostResponse
+	getErr  error
 }
 
 // ListDedicatedVmHosts/DeleteDedicatedVmHost signatures below must match the real
@@ -40,6 +39,13 @@ func (s *stubDedicatedVmHostClient) DeleteDedicatedVmHost(
 ) (core.DeleteDedicatedVmHostResponse, error) {
 	s.deleted = append(s.deleted, *req.DedicatedVmHostId)
 	return core.DeleteDedicatedVmHostResponse{}, nil
+}
+
+func (s *stubDedicatedVmHostClient) GetDedicatedVmHost(
+	_ context.Context,
+	_ core.GetDedicatedVmHostRequest,
+) (core.GetDedicatedVmHostResponse, error) {
+	return s.getResp, s.getErr
 }
 
 // TestDedicatedVmHostLister_List proves dedicatedVmHostList returns exactly one resource, wrapping
@@ -67,9 +73,8 @@ func TestDedicatedVmHostLister_List(t *testing.T) {
 }
 
 // TestDedicatedVmHost_Filter is table-driven over every core.DedicatedVmHostSummaryLifecycleStateEnum
-// value -- CREATING/ACTIVE/UPDATING must return nil (present), DELETING/DELETED must return
-// non-nil (excluded), and FAILED must also return non-nil (excluded, and additionally reported --
-// see TestDedicatedVmHost_Filter_FailedReportsLeftover below).
+// value -- CREATING/ACTIVE/UPDATING/FAILED must return nil (present), DELETING/DELETED must return
+// non-nil (excluded). FAILED is present so a FAILED host still gets deleted.
 func TestDedicatedVmHost_Filter(t *testing.T) {
 	tests := []struct {
 		state   core.DedicatedVmHostSummaryLifecycleStateEnum
@@ -80,7 +85,7 @@ func TestDedicatedVmHost_Filter(t *testing.T) {
 		{core.DedicatedVmHostSummaryLifecycleStateUpdating, true},
 		{core.DedicatedVmHostSummaryLifecycleStateDeleting, false},
 		{core.DedicatedVmHostSummaryLifecycleStateDeleted, false},
-		{core.DedicatedVmHostSummaryLifecycleStateFailed, false},
+		{core.DedicatedVmHostSummaryLifecycleStateFailed, true},
 	}
 
 	id := testResourceOCID
@@ -97,44 +102,6 @@ func TestDedicatedVmHost_Filter(t *testing.T) {
 		if !tc.present && err == nil {
 			t.Errorf("Filter() with excluded state %s = nil, want non-nil", tc.state)
 		}
-	}
-}
-
-// TestDedicatedVmHost_Filter_FailedReportsLeftover proves a FAILED host is excluded via
-// ocinuke.ReportLeftover(scope.ReasonAPIError) before Filter() returns its exclusion error --
-// FAILED surfaces as a labeled leftover, never a silent scan-time drop (T-04-12).
-func TestDedicatedVmHost_Filter_FailedReportsLeftover(t *testing.T) {
-	var got []*scope.SkipEvent
-	restore := ocinuke.SetRunContext(func(string) bool { return true }, func(evt *scope.SkipEvent) {
-		got = append(got, evt)
-	})
-	defer restore()
-
-	id := testResourceOCID
-	compartmentID := testCompartmentOCID
-	r := &DedicatedVmHost{}
-	r.dedicatedVmHost.Id = &id
-	r.dedicatedVmHost.CompartmentId = &compartmentID
-	r.dedicatedVmHost.LifecycleState = core.DedicatedVmHostSummaryLifecycleStateFailed
-
-	if err := r.Filter(); err == nil {
-		t.Fatal("Filter() with FAILED state = nil, want non-nil")
-	}
-
-	if len(got) != 1 {
-		t.Fatalf("ReportLeftover called %d times, want 1", len(got))
-	}
-	if got[0].Reason != scope.ReasonAPIError {
-		t.Errorf("SkipEvent.Reason = %q, want %q", got[0].Reason, scope.ReasonAPIError)
-	}
-	if got[0].ResourceType != DedicatedVmHostResourceType {
-		t.Errorf("SkipEvent.ResourceType = %q, want %q", got[0].ResourceType, DedicatedVmHostResourceType)
-	}
-	if got[0].ResourceID != id {
-		t.Errorf("SkipEvent.ResourceID = %q, want %q", got[0].ResourceID, id)
-	}
-	if got[0].CompartmentID != compartmentID {
-		t.Errorf("SkipEvent.CompartmentID = %q, want %q", got[0].CompartmentID, compartmentID)
 	}
 }
 

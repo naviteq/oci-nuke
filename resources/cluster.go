@@ -128,8 +128,8 @@ func (r *Cluster) UniqueKey() string {
 // Filter is called from TWO structurally different contexts (04-RESEARCH.md Q2) -- see
 // resources/instance.go's Filter() doc comment. Present = CREATING, ACTIVE, UPDATING, FAILED --
 // a FAILED cluster still exists and is still a valid DeleteCluster target, so it is deliberately
-// NOT excluded here (unlike resources/mount_target.go's FAILED-is-permanently-stuck precedent,
-// which does not apply absent evidence OKE blocks DeleteCluster on a FAILED cluster).
+// NOT excluded here. LoadBalancer, MountTarget and the other resources/failed_delete.go types
+// follow the same rule.
 // DELETING/DELETED are excluded (going/gone, the hang-trap defense), as is any future SDK value
 // this switch does not recognize (fail-safe exclusion).
 func (r *Cluster) Filter() error {

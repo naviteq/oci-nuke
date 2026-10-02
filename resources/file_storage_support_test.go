@@ -60,8 +60,12 @@ type fakeFileStorageClient struct {
 
 	deletedMountTargets []string
 	deletedFileSystems  []string
-	deletedExports      []string
-	deletedSnapshots    []string
+
+	getMountTargetResp filestorage.GetMountTargetResponse
+	getFileSystemResp  filestorage.GetFileSystemResponse
+	getErr             error
+	deletedExports     []string
+	deletedSnapshots   []string
 }
 
 func (s *fakeFileStorageClient) ListAvailabilityDomains(
@@ -87,6 +91,12 @@ func (s *fakeFileStorageClient) DeleteMountTarget(
 	return filestorage.DeleteMountTargetResponse{}, nil
 }
 
+func (s *fakeFileStorageClient) GetMountTarget(
+	_ context.Context, _ filestorage.GetMountTargetRequest,
+) (filestorage.GetMountTargetResponse, error) {
+	return s.getMountTargetResp, s.getErr
+}
+
 func (s *fakeFileStorageClient) ListFileSystems(
 	_ context.Context, req filestorage.ListFileSystemsRequest,
 ) (filestorage.ListFileSystemsResponse, error) {
@@ -99,6 +109,12 @@ func (s *fakeFileStorageClient) DeleteFileSystem(
 ) (filestorage.DeleteFileSystemResponse, error) {
 	s.deletedFileSystems = append(s.deletedFileSystems, safeDeref(req.FileSystemId))
 	return filestorage.DeleteFileSystemResponse{}, nil
+}
+
+func (s *fakeFileStorageClient) GetFileSystem(
+	_ context.Context, _ filestorage.GetFileSystemRequest,
+) (filestorage.GetFileSystemResponse, error) {
+	return s.getFileSystemResp, s.getErr
 }
 
 func (s *fakeFileStorageClient) ListExports(
@@ -221,8 +237,8 @@ func TestMountTargetLister_List_EnumeratesEveryAD(t *testing.T) {
 	}
 }
 
-// TestMountTarget_Filter proves the six-value lifecycle switch: CREATING/ACTIVE/UPDATING present,
-// DELETING/DELETED excluded, FAILED excluded AND reported via ReportLeftover(ReasonAPIError).
+// TestMountTarget_Filter proves the six-value lifecycle switch: CREATING/ACTIVE/UPDATING/FAILED
+// present, DELETING/DELETED excluded.
 func TestMountTarget_Filter(t *testing.T) {
 	tests := []struct {
 		state   filestorage.MountTargetSummaryLifecycleStateEnum
@@ -233,7 +249,7 @@ func TestMountTarget_Filter(t *testing.T) {
 		{filestorage.MountTargetSummaryLifecycleStateUpdating, true},
 		{filestorage.MountTargetSummaryLifecycleStateDeleting, false},
 		{filestorage.MountTargetSummaryLifecycleStateDeleted, false},
-		{filestorage.MountTargetSummaryLifecycleStateFailed, false},
+		{filestorage.MountTargetSummaryLifecycleStateFailed, true},
 	}
 
 	for _, tc := range tests {

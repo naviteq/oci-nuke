@@ -51,8 +51,8 @@ func TestFileSystemLister_List_EnumeratesEveryAD(t *testing.T) {
 	}
 }
 
-// TestFileSystem_Filter proves the six-value lifecycle switch: CREATING/ACTIVE/UPDATING present,
-// DELETING/DELETED excluded, FAILED excluded AND reported via ReportLeftover(ReasonAPIError).
+// TestFileSystem_Filter proves the six-value lifecycle switch: CREATING/ACTIVE/UPDATING/FAILED
+// present, DELETING/DELETED excluded.
 func TestFileSystem_Filter(t *testing.T) {
 	tests := []struct {
 		state   filestorage.FileSystemSummaryLifecycleStateEnum
@@ -63,7 +63,7 @@ func TestFileSystem_Filter(t *testing.T) {
 		{filestorage.FileSystemSummaryLifecycleStateUpdating, true},
 		{filestorage.FileSystemSummaryLifecycleStateDeleting, false},
 		{filestorage.FileSystemSummaryLifecycleStateDeleted, false},
-		{filestorage.FileSystemSummaryLifecycleStateFailed, false},
+		{filestorage.FileSystemSummaryLifecycleStateFailed, true},
 	}
 
 	for _, tc := range tests {

@@ -13,7 +13,6 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/filestorage"
 
 	"github.com/naviteq/oci-nuke/pkg/ocinuke"
-	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // mountTargetClient is the narrow slice this lister needs: availabilityDomainClient's
@@ -25,6 +24,7 @@ type mountTargetClient interface {
 	availabilityDomainClient
 	ListMountTargets(ctx context.Context, req filestorage.ListMountTargetsRequest) (filestorage.ListMountTargetsResponse, error)
 	DeleteMountTarget(ctx context.Context, req filestorage.DeleteMountTargetRequest) (filestorage.DeleteMountTargetResponse, error)
+	GetMountTarget(ctx context.Context, req filestorage.GetMountTargetRequest) (filestorage.GetMountTargetResponse, error)
 }
 
 // MountTargetResourceType is the registry.Registration.Name for MountTarget.
@@ -110,6 +110,7 @@ func mountTargetList(
 
 // MountTarget wraps one filestorage.MountTargetSummary.
 type MountTarget struct {
+	failedDeletes
 	client mountTargetClient
 	target filestorage.MountTargetSummary
 }
@@ -127,27 +128,17 @@ func (r *MountTarget) UniqueKey() string { return *r.target.Id }
 //
 // filestorage.MountTargetSummaryLifecycleStateEnum (verified this session,
 // filestorage/mount_target_summary.go) has exactly six values: CREATING, ACTIVE, DELETING,
-// DELETED, FAILED, UPDATING. CREATING/ACTIVE/UPDATING are present; DELETING/DELETED are excluded
-// (going/gone, the hang-trap defense). FAILED is a genuine error state OCI itself cannot resolve
-// -- excluded like DELETING/DELETED, but additionally reported via
-// ocinuke.ReportLeftover(ReasonAPIError) before returning the exclusion error, mirroring
-// resources/block_volume.go's FAULTY handling, so a FAILED mount target surfaces as a labeled
-// leftover rather than a silent scan-time drop.
+// DELETED, FAILED, UPDATING. DELETING/DELETED are excluded (going/gone, the hang-trap defense).
+// FAILED is present: OCI never moves a mount target out of FAILED on its own, but
+// DeleteMountTarget accepts it. A delete that ends in FAILED is caught by HandleWait below, not
+// here -- see resources/failed_delete.go.
 func (r *MountTarget) Filter() error {
 	switch r.target.LifecycleState {
 	case filestorage.MountTargetSummaryLifecycleStateCreating,
 		filestorage.MountTargetSummaryLifecycleStateActive,
-		filestorage.MountTargetSummaryLifecycleStateUpdating:
+		filestorage.MountTargetSummaryLifecycleStateUpdating,
+		filestorage.MountTargetSummaryLifecycleStateFailed:
 		return nil
-	case filestorage.MountTargetSummaryLifecycleStateFailed:
-		ocinuke.ReportLeftover(ocinuke.CurrentReporter, &scope.SkipEvent{
-			Reason:        scope.ReasonAPIError,
-			ResourceType:  MountTargetResourceType,
-			ResourceID:    *r.target.Id,
-			CompartmentID: *r.target.CompartmentId,
-			Detail:        "mount target is FAILED",
-		})
-		return fmt.Errorf("MountTarget is %s, not available", r.target.LifecycleState)
 	default:
 		return fmt.Errorf("MountTarget is %s, not available", r.target.LifecycleState)
 	}
@@ -167,11 +158,32 @@ func (r *MountTarget) SafetyTags() (freeform, defined map[string]string, created
 
 // Remove is a direct delete call -- protect-by-tag/min-age protection is now applied at SCAN
 // time (SafetyTags above), before this resource can ever become a queue.Item, so a protected
-// resource never reaches Remove() at all, in either dry-run or --no-dry-run mode.
+// resource never reaches Remove() at all, in either dry-run or --no-dry-run mode. It stops
+// deleting once maxFailedDeletes deletes have ended in FAILED (resources/failed_delete.go).
 func (r *MountTarget) Remove(ctx context.Context) error {
+	if refused := r.refuse(); refused != nil {
+		return refused
+	}
 	x := r.target
 	_, err := r.client.DeleteMountTarget(ctx, filestorage.DeleteMountTargetRequest{MountTargetId: x.Id})
+	r.issued(err)
 	return holdOn409(err)
+}
+
+// HandleWait satisfies resource.HandleWaitHook. It reads the mount target back after the delete
+// and reports a delete that ended in FAILED -- see resources/failed_delete.go.
+func (r *MountTarget) HandleWait(ctx context.Context) error {
+	resp, err := r.client.GetMountTarget(ctx, filestorage.GetMountTargetRequest{MountTargetId: r.target.Id})
+	outcome := deleteNotStarted
+	switch resp.LifecycleState {
+	case filestorage.MountTargetLifecycleStateDeleting:
+		outcome = deleteInFlight
+	case filestorage.MountTargetLifecycleStateDeleted:
+		outcome = deleteGone
+	case filestorage.MountTargetLifecycleStateFailed:
+		outcome = deleteFailed
+	}
+	return r.wait("mount target", outcome, safeDeref(resp.LifecycleDetails), err)
 }
 
 // Properties exposes the filter vocabulary this type supports, built from resources/support.go's

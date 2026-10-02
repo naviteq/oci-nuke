@@ -100,6 +100,15 @@ that is still being listed after `Remove()` succeeded will never be recognized a
 libnuke's round-based queue loop has no external timeout -- it polls forever, and a destructive
 run against a real tenancy hangs indefinitely.
 
+**A FAILED state is present, not excluded.** A resource in `FAILED` still exists, and its delete
+is still accepted. Excluding it at scan time means it is never deleted; excluding it at wait time
+turns a delete that ended in `FAILED` into a reported success. Listing it as present is not
+enough on its own, though: libnuke leaves a present resource in `ItemStateWaiting` and never calls
+`Remove()` again from there. Embed `failedDeletes` and implement `HandleWait` with one `Get*`
+call, as `resources/mount_target.go` does. The hook keeps the item waiting while the resource is
+`DELETING`, reports `FAILED` so the delete is re-issued, and after three failed deletes holds the
+item with the reason for the leftover report. `resources/failed_delete.go` explains each case.
+
 If your SDK type genuinely has **no lifecycle-state-shaped field at all** (verified by reading the
 SDK struct's source directly, not by assumption), `Filter()` correctly returns `nil`
 unconditionally -- "gone" is entirely "absent from `List()`." `resources_test/filter_contract_test.go`
