@@ -1,13 +1,14 @@
-# Vault
+# VaultSecret
 
 - Scope: compartment
-- DependsOn: KmsKey, VaultSecret
+- DependsOn: none
 
 ## Properties
 
 - `compartment_id`
 - `id`
+- `key_id`
 - `lifecycle_state`
-- `management_endpoint`
 - `name`
 - `time_created`
+- `vault_id`

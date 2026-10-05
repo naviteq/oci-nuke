@@ -141,6 +141,18 @@ const (
 	ReasonCompartmentStillDeleting RefusalReason = "compartment-still-deleting"
 )
 
+// OutlivesRun reports whether a resource skipped for this reason is still in its compartment when
+// the run ends -- nothing the run does removes it, so OCI will refuse to delete the compartment.
+func (r RefusalReason) OutlivesRun() bool {
+	switch r {
+	case ReasonProtectedByTag, ReasonTooYoung, ReasonScheduledDeletion,
+		ReasonRetentionLocked, ReasonDeleteProtected, ReasonBackupResidue:
+		return true
+	default:
+		return false
+	}
+}
+
 // SkipEvent records a single skip decision. It is deliberately flat and JSON-serializable
 // without any further transformation, since Phase 3's plan-artifact writer consumes this shape
 // directly.

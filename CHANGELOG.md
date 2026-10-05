@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0] (2026-10-05)
+
+
+### Features
+
+* reap vault secrets, and delete a compartment only once it is empty
+
+
+### Bug Fixes
+
+* min-age protects OKE clusters and node pools
+
 ## [2.1.2] (2026-10-02)
 
 

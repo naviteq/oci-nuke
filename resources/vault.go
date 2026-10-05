@@ -50,7 +50,9 @@ func init() {
 		// must be removed BEFORE the vault that hosts them, never assumed to be cleaned up as a
 		// side effect of ScheduleVaultDeletion. A bare string literal, per every other
 		// cross-plan-boundary DependsOn edge in this wave (resources/vcn.go's own convention).
-		DependsOn: []string{"KmsKey"},
+		// VaultSecret is listed too, not left to arrive through KmsKey: with every key in a
+		// vault protected, nothing would hold the vault back for its secrets.
+		DependsOn: []string{"KmsKey", VaultSecretResourceType},
 	}, ocinuke.CurrentScope, ocinuke.CurrentReporter)
 }
 

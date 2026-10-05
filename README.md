@@ -138,9 +138,19 @@ sibling-subtree deletion is deliberately sequential in this first implementation
 automation timeouts accordingly for deeply nested targets: three nesting levels at the 15-minute
 floor is up to 45 minutes, not 15.
 
-A compartment with a blocklisted descendant is never attempted at all — it cannot physically
-empty, so attempting it would only burn retry budget and muddy the report — and is instead
-reported as a leftover explaining why.
+A compartment is only deleted once it is actually empty. While the run is still removing things
+in it, its delete waits, without calling OCI. If anything will outlive the run — a vault, key or
+secret only scheduled for deletion, a protected or too-young resource, backup residue, a config
+filter's catch, a child compartment that stays — it is not attempted at all and is reported as
+`compartment-not-empty`, naming what holds it; the dry-run plan says so too, so nobody approves a
+delete that cannot happen. If OCI refuses the delete of a compartment the run had nothing in
+(something in an unscanned region, or a type `oci-nuke` does not know), that refusal is final for
+the run rather than retried for the whole wait budget. Each of these is picked up again by a later
+run. A compartment with a blocklisted descendant is never attempted either.
+
+`--delete-compartments` includes the target compartment itself. To clean a parent's empty
+children but keep the parent, filter the parent's own `Compartment` out by `id` under its
+`filters` block.
 
 See [`docs/adr/0001-build-on-libnuke.md`](https://github.com/naviteq/oci-nuke/blob/main/docs/adr/0001-build-on-libnuke.md) for why this
 project builds on [`ekristen/libnuke`](https://github.com/ekristen/libnuke) rather than
@@ -156,10 +166,11 @@ Not every resource this tool finds can actually be removed on the run that finds
 platform itself imposes a handful of limitations, each reported through a machine-readable
 `scope.Reason*` value so an operator never has to guess why something is still there:
 
-- **`Vault` and `KmsKey` scheduled-deletion window** (`scope.ReasonScheduledDeletion`). OCI
-  enforces a 7-30 day deletion window on vaults and keys that a run cannot shorten. `oci-nuke`
-  schedules the deletion and reports the resource as a leftover rather than treating the delay
-  as a failure.
+- **`Vault`, `KmsKey` and `VaultSecret` scheduled-deletion window** (`scope.ReasonScheduledDeletion`).
+  OCI enforces a 7-30 day deletion window on vaults and keys, and a 1-30 day one on secrets, that
+  a run cannot shorten. `oci-nuke` schedules the deletion and reports the resource as a leftover
+  rather than treating the delay as a failure. A secret's name stays taken until its window
+  ends, which is why secrets default to the one-day floor.
 - **`RetentionRule` permanent lock** (`scope.ReasonRetentionLocked`). A retention rule locks
   permanently 14 days after creation and, once locked, can only be removed by deleting the
   bucket it belongs to — never directly. Because `Bucket` declares `RetentionRule` as a
@@ -171,11 +182,13 @@ platform itself imposes a handful of limitations, each reported through a machin
 - **`MySQLDbSystem` service-level delete protection** (`scope.ReasonDeleteProtected`). When
   `DeletionPolicy.IsDeleteProtected` is set on the DB system, OCI's own service refuses the
   delete — independent of any `oci-nuke` configuration, and not bypassed by `--force`.
-- **`Compartment` with a blocklisted descendant** (`scope.ReasonCompartmentNotEmpty`). A
-  compartment that contains a blocklisted descendant can never physically empty, so `oci-nuke`
-  never attempts to delete it at all — attempting would only burn retry budget. The same reason
-  also covers a `DeleteCompartment` work request that failed because the compartment still had
-  resources in it.
+- **`Compartment` that will not be empty** (`scope.ReasonCompartmentNotEmpty`). A compartment
+  with a blocklisted descendant can never physically empty, so `oci-nuke` never attempts to delete
+  it. Nor does it attempt one that still holds anything the run will leave behind — a scheduled
+  deletion, a protected or too-young resource, backup residue, a child compartment that stays —
+  or one whose `DeleteCompartment` OCI refused while the run had nothing of its own in it. The
+  plan already shows such a compartment as skipped and names what holds it; a later run deletes
+  it once that is gone.
 - **Database backup residue for `AutonomousDatabase`, `DbSystem`, and `MySQLDbSystem`**
   (`scope.ReasonBackupResidue`). Terminating one of these database types leaves an automatic
   post-termination backup behind that Oracle itself retains for 72 hours to 95 days.
@@ -194,7 +207,7 @@ core extracted from `aws-nuke` v3, shared with `gcp-nuke` and `azure-nuke`) plus
 hand-rolled `scripts/oci-nuke.py` as Naviteq's OCI sandbox/CI teardown tool, and will be
 open-sourced under `naviteq/oci-nuke` once its scope is complete.
 
-`oci-nuke` currently registers **57 resource types** across compute, storage, networking,
+`oci-nuke` currently registers **58 resource types** across compute, storage, networking,
 OKE/OCIR, databases, IAM, KMS and the platform services — plus the target compartment itself
 behind an explicit opt-in. `oci-nuke resource-types` lists them, and [`docs/resources`](./docs/resources)
 documents each one.

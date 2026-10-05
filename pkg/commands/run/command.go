@@ -160,6 +160,11 @@ type pipelineRun struct {
 	// fresh by newCompartmentScanner for every constructed ocinuke.ListerOpts -- the identical
 	// wiring shape safetyFilter already established.
 	vaultDeletionWindowDays int
+	// secretDeletionWindowDays is settings.vault.secret-deletion-window-days, wired the same way.
+	secretDeletionWindowDays int
+	// skipEvents reads the run's leftover accumulator. Set once the accumulator exists, after
+	// the approved-plan gate, so the gate's own scan sees nil.
+	skipEvents func() []scope.SkipEvent
 	// tree holds this run's already-fetched *scope.Tree (resolveScope's own return value),
 	// populated once in runPipeline immediately after resolveScope returns and read fresh by
 	// newCompartmentScanner (for CompartmentHasBlocklistedDescendant) and buildNukes (for
@@ -580,7 +585,7 @@ func verifyApprovedPlan(
 	}
 
 	rescanSkipEvents := append(append([]scope.SkipEvent(nil), blocklistSkipEvents...), rescanAccumulator.snapshot()...)
-	freshArtifact, err := buildArtifact(body, rescanSkipEvents)
+	freshArtifact, err := buildArtifact(body, rescanSkipEvents, tree)
 	if err != nil {
 		return err
 	}
@@ -786,11 +791,9 @@ func runPipeline(ctx context.Context, provider ocicommon.ConfigurationProvider, 
 	}
 	pr.safetyFilter = safetyFilter
 
-	vaultDeletionWindowDays, err := ocinuke.VaultDeletionWindowDaysFromSettings(pr.cfg.Settings)
-	if err != nil {
+	if err := resolveDeletionWindows(pr); err != nil {
 		return &ExitError{Code: ExitRefused, Err: fmt.Errorf("parsing settings.vault: %w", err)}
 	}
-	pr.vaultDeletionWindowDays = vaultDeletionWindowDays
 
 	params := buildParameters(&pr.opts)
 
@@ -820,6 +823,7 @@ func runPipeline(ctx context.Context, provider ocicommon.ConfigurationProvider, 
 	// this is the ONLY reporter whose events reach the real run's final --plan-out artifact
 	// (finishNukes' accumulator.snapshot() call).
 	accumulator := &leftoverAccumulator{}
+	pr.skipEvents = accumulator.snapshot
 	restore := ocinuke.SetRunContext(func(id string) bool {
 		_, ok := inScope[id]
 		return ok
@@ -1039,7 +1043,9 @@ func resolveResourceTypes(pr *pipelineRun, params *libnuke.Parameters) types.Col
 // every scanner of every compartment's Nuke -- so ocinuke.ListerOpts.BeforeList's Global-
 // geography guard compares each scanner's own Region against the one true home region,
 // regardless of which region this particular scanner was built for.
-func newCompartmentScanner(pr *pipelineRun, resourceTypes types.Collection, region, compartmentID string) (*scanner.Scanner, error) {
+func newCompartmentScanner(
+	pr *pipelineRun, resourceTypes types.Collection, region, compartmentID string, occupancy func() ocinuke.Occupancy,
+) (*scanner.Scanner, error) {
 	hasBlocklistedDescendant := false
 	if pr.tree != nil {
 		hasBlocklistedDescendant = pr.tree.HasBlocklistedDescendant(compartmentID, pr.blocklist)
@@ -1057,7 +1063,9 @@ func newCompartmentScanner(pr *pipelineRun, resourceTypes types.Collection, regi
 			Clients:                             pr.clients,
 			SafetyFilter:                        pr.safetyFilter,
 			VaultDeletionWindowDays:             pr.vaultDeletionWindowDays,
+			SecretDeletionWindowDays:            pr.secretDeletionWindowDays,
 			CompartmentHasBlocklistedDescendant: hasBlocklistedDescendant,
+			CompartmentOccupancy:                occupancy,
 		},
 		Logger: pr.logger,
 	})
@@ -1078,7 +1086,7 @@ func buildScanners(pr *pipelineRun, params *libnuke.Parameters, inScope map[stri
 	scanners := make([]*scanner.Scanner, 0, len(inScope)*len(pr.regions))
 	for compartmentID := range inScope {
 		for _, region := range pr.regions {
-			s, err := newCompartmentScanner(pr, resourceTypes, region, compartmentID)
+			s, err := newCompartmentScanner(pr, resourceTypes, region, compartmentID, nil)
 			if err != nil {
 				return nil, fmt.Errorf("constructing scanner for %s/%s: %w", region, compartmentID, err)
 			}
@@ -1137,9 +1145,10 @@ func buildNukes(pr *pipelineRun, params *libnuke.Parameters, inScope map[string]
 		n.RegisterValidateHandler(func() error {
 			return verifyTenancy(pr.ctx, pr.provider, pr.cfg.TenancyID)
 		})
+		occupancy := compartmentOccupancy(pr, n, compartmentID)
 
 		for _, region := range pr.regions {
-			s, err := newCompartmentScanner(pr, resourceTypes, region, compartmentID)
+			s, err := newCompartmentScanner(pr, resourceTypes, region, compartmentID, occupancy)
 			if err != nil {
 				return nil, fmt.Errorf("constructing scanner for %s/%s: %w", region, compartmentID, err)
 			}
@@ -1162,6 +1171,33 @@ func buildNukes(pr *pipelineRun, params *libnuke.Parameters, inScope map[string]
 	nukes = append(nukes, rootNukes...)
 
 	return nukes, nil
+}
+
+// resolveDeletionWindows reads settings.vault's two scheduled-deletion windows into pr.
+func resolveDeletionWindows(pr *pipelineRun) error {
+	vaultDays, err := ocinuke.VaultDeletionWindowDaysFromSettings(pr.cfg.Settings)
+	if err != nil {
+		return err
+	}
+	secretDays, err := ocinuke.SecretDeletionWindowDaysFromSettings(pr.cfg.Settings)
+	if err != nil {
+		return err
+	}
+	pr.vaultDeletionWindowDays, pr.secretDeletionWindowDays = vaultDays, secretDays
+	return nil
+}
+
+// compartmentOccupancy is what Compartment.Remove() asks before deleting compartmentID: this
+// Nuke's own queue, which holds every resource of the compartment across regions, and the skip
+// events the run has reported so far.
+func compartmentOccupancy(pr *pipelineRun, n *libnuke.Nuke, compartmentID string) func() ocinuke.Occupancy {
+	return func() ocinuke.Occupancy {
+		var skips []scope.SkipEvent
+		if pr.skipEvents != nil {
+			skips = pr.skipEvents()
+		}
+		return ocinuke.CompartmentOccupancy(compartmentID, n.Queue.GetItems(), skips)
+	}
 }
 
 // tenancyRootAllowance builds this run's allowance from config. An absent or empty
@@ -1214,7 +1250,7 @@ func buildTenancyRootNukes(pr *pipelineRun, params *libnuke.Parameters) ([]*libn
 	})
 
 	for _, region := range pr.regions {
-		s, err := newCompartmentScanner(pr, rootTypes, region, pr.cfg.TenancyID)
+		s, err := newCompartmentScanner(pr, rootTypes, region, pr.cfg.TenancyID, nil)
 		if err != nil {
 			return nil, fmt.Errorf("constructing tenancy-root scanner for %s: %w", region, err)
 		}
@@ -1351,7 +1387,7 @@ func finishNukes(pr *pipelineRun, nukes []*libnuke.Nuke, blocklistSkipEvents []s
 	// two separate merge passes over the same body.Entries list (T-04-06).
 	skipEvents := append(append([]scope.SkipEvent(nil), blocklistSkipEvents...), accumulator.snapshot()...)
 
-	artifact, err := buildAndReportArtifact(&pr.opts, pr.logger, body, skipEvents, warnings)
+	artifact, err := buildAndReportArtifact(&pr.opts, pr.logger, body, skipEvents, warnings, pr.tree)
 	if err != nil {
 		return err
 	}
@@ -1375,8 +1411,11 @@ func finishNukes(pr *pipelineRun, nukes []*libnuke.Nuke, blocklistSkipEvents []s
 // be no second, independently-written hashing/artifact-construction logic anywhere in this file
 // -- both callers reuse this function unmodified, and it is the only call site in this file for
 // pkg/plan's own artifact constructor.
-func buildArtifact(body plan.Body, skipEvents []scope.SkipEvent) (plan.Artifact, error) {
+func buildArtifact(body plan.Body, skipEvents []scope.SkipEvent, tree *scope.Tree) (plan.Artifact, error) {
 	body.Entries = plan.MergeSkipEvents(body.Entries, skipEvents)
+	if tree != nil {
+		body.Entries = plan.DeferNonEmptyCompartments(body.Entries, tree.Children, tree.LifecycleState)
+	}
 
 	artifact, err := plan.NewArtifact(body)
 	if err != nil {
@@ -1397,8 +1436,9 @@ func buildAndReportArtifact(
 	body plan.Body,
 	skipEvents []scope.SkipEvent,
 	warnings []ocinuke.FilterWarning,
+	tree *scope.Tree,
 ) (plan.Artifact, error) {
-	artifact, err := buildArtifact(body, skipEvents)
+	artifact, err := buildArtifact(body, skipEvents, tree)
 	if err != nil {
 		return plan.Artifact{}, err
 	}

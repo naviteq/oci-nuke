@@ -69,9 +69,13 @@ compartment-blocklist:
 #     # OCI enforces a 7-30 day deletion window on vaults and keys; a run cannot shorten
 #     # it. Vaults are scheduled, then reported as residue rather than as failures.
 #     deletion-window-days: 7
+#     # Secrets allow 1-30 days. The name stays taken until the window ends, so the
+#     # default is the one-day floor.
+#     secret-deletion-window-days: 1
 #   compartment:
-#     # Delete the target compartment itself once it is empty. Off by default. The
-#     # --delete-compartments flag can only turn this on, never override it back off.
+#     # Delete the target compartment and its sub-compartments once each is empty. Off by
+#     # default. A compartment something will outlive the run in is skipped, not tried.
+#     # The --delete-compartments flag can only turn this on, never override it back off.
 #     delete: false
 
 # Per-compartment filters. Each compartment resolves its own filter set — a filter written

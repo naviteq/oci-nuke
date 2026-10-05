@@ -25,6 +25,10 @@ const vaultSettingsKey = "vault"
 // vaultDeletionWindowDaysKey is the field name inside settings.vault this package reads.
 const vaultDeletionWindowDaysKey = "deletion-window-days"
 
+// secretDeletionWindowDaysKey is the field inside settings.vault that VaultSecret's window is read
+// from. It sits under "vault" because a secret lives in one; there is no separate settings block.
+const secretDeletionWindowDaysKey = "secret-deletion-window-days"
+
 // compartmentSettingsKey is the reserved pseudo-type-name under settings.yaml's "settings" map
 // that DeleteCompartmentsEnabledFromSettings reads the config-file mirror of --delete-compartments
 // from -- mirroring protectSettingsKey/vaultSettingsKey's reservation exactly (06-03-PLAN.md).
@@ -51,6 +55,15 @@ const (
 	maxVaultDeletionWindowDays = 30
 )
 
+// defaultSecretDeletionWindowDays, minSecretDeletionWindowDays and maxSecretDeletionWindowDays are
+// OCI's bounds for ScheduleSecretDeletionDetails.TimeOfDeletion: one to thirty days. The default is
+// the floor, for the reason defaultVaultDeletionWindowDays is.
+const (
+	defaultSecretDeletionWindowDays = 1
+	minSecretDeletionWindowDays     = 1
+	maxSecretDeletionWindowDays     = 30
+)
+
 // VaultDeletionWindowDaysFromSettings parses the settings.vault.deletion-window-days block of a
 // *settings.Settings into an int, mirroring SafetyFilterConfigFromSettings's exact
 // zero-value-safe shape: s == nil, a missing "vault" key, and an empty settings.vault block all
@@ -62,46 +75,52 @@ const (
 // already enforces this range for any config file that went through `config validate`, but this
 // function must not silently accept an out-of-range value reached by any other path (T-05-06-01).
 func VaultDeletionWindowDaysFromSettings(s *settings.Settings) (int, error) {
+	return windowDaysFromSettings(s, vaultDeletionWindowDaysKey,
+		defaultVaultDeletionWindowDays, minVaultDeletionWindowDays, maxVaultDeletionWindowDays)
+}
+
+// SecretDeletionWindowDaysFromSettings parses settings.vault.secret-deletion-window-days, the
+// window VaultSecret schedules deletions with. Same shape and same default rule as the vault
+// window: the earliest OCI allows, which for a secret is one day. The secret's name stays taken
+// until the window ends, so a long one blocks whatever recreates it under the same name.
+func SecretDeletionWindowDaysFromSettings(s *settings.Settings) (int, error) {
+	return windowDaysFromSettings(s, secretDeletionWindowDaysKey,
+		defaultSecretDeletionWindowDays, minSecretDeletionWindowDays, maxSecretDeletionWindowDays)
+}
+
+// windowDaysFromSettings reads one integer day count from settings.vault and checks it against
+// [lowest, highest]. A missing value yields def.
+func windowDaysFromSettings(s *settings.Settings, key string, def, lowest, highest int) (int, error) {
 	if s == nil {
-		return defaultVaultDeletionWindowDays, nil
+		return def, nil
 	}
 
 	setting := s.Get(vaultSettingsKey)
 	if setting == nil || len(*setting) == 0 {
-		return defaultVaultDeletionWindowDays, nil
+		return def, nil
 	}
 
-	raw, ok := (*setting)[vaultDeletionWindowDaysKey]
+	raw, ok := (*setting)[key]
 	if !ok {
-		return defaultVaultDeletionWindowDays, nil
+		return def, nil
 	}
 
-	// I-WR-01 (05-REVIEW-infra.md): pkg/config/schema/config.schema.json's "type": "integer"
-	// legitimately accepts a whole-number float per the JSON Schema spec (e.g. 14.0), and
-	// yaml.v3 decodes any YAML number with a fractional-looking literal into interface{} as
-	// float64, never int -- so a config file `config validate` already accepted must not fail
-	// here with a raw type-assertion error. Both concrete types the decoder can plausibly
-	// produce for a schema-valid integer are accepted; a genuinely fractional float64 (schema
-	// would have already rejected it, but this function must not silently truncate one reached
-	// by any path that bypasses schema validation, e.g. a test or library caller constructing
-	// *settings.Settings by hand) is still a hard error, matching this function's own
-	// defense-in-depth stance on the [7,30] range below.
 	var days int
 	switch v := raw.(type) {
 	case int:
 		days = v
 	case float64:
 		if v != math.Trunc(v) {
-			return 0, fmt.Errorf("settings.vault.deletion-window-days: expected a whole number, got %v", v)
+			return 0, fmt.Errorf("settings.vault.%s: expected a whole number, got %v", key, v)
 		}
 		days = int(v)
 	default:
-		return 0, fmt.Errorf("settings.vault.deletion-window-days: expected an integer, got %T", raw)
+		return 0, fmt.Errorf("settings.vault.%s: expected an integer, got %T", key, raw)
 	}
-	if days < minVaultDeletionWindowDays || days > maxVaultDeletionWindowDays {
+	if days < lowest || days > highest {
 		return 0, fmt.Errorf(
-			"settings.vault.deletion-window-days: %d is outside the OCI-enforced range [%d,%d]",
-			days, minVaultDeletionWindowDays, maxVaultDeletionWindowDays,
+			"settings.vault.%s: %d is outside the OCI-enforced range [%d,%d]",
+			key, days, lowest, highest,
 		)
 	}
 

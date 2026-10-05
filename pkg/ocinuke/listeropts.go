@@ -51,6 +51,10 @@ type ListerOpts struct {
 	// explicit TimeOfDeletion, rather than relying on the OCI SDK's own 30-day default.
 	VaultDeletionWindowDays int
 
+	// SecretDeletionWindowDays is settings.vault.secret-deletion-window-days for this run, read by
+	// VaultSecret.Remove() the way Vault and KmsKey read VaultDeletionWindowDays.
+	SecretDeletionWindowDays int
+
 	// CompartmentHasBlocklistedDescendant holds, for the ONE compartment this ListerOpts value's
 	// CompartmentID identifies, whether scope.Tree.HasBlocklistedDescendant found a blocklisted
 	// compartment anywhere beneath it. Populated once per constructed ListerOpts by a later plan's
@@ -61,6 +65,11 @@ type ListerOpts struct {
 	// OTHER resource type's Lister.List ignores this field entirely, and Compartment's own lister
 	// (resources/compartment.go's compartmentLister) is the only reader.
 	CompartmentHasBlocklistedDescendant bool
+
+	// CompartmentOccupancy reports what this run knows still sits in CompartmentID, read by
+	// Compartment.Remove() before it asks OCI to delete the compartment. Nil outside a Nuke
+	// (plan-gate scanners), where Remove() is never reached.
+	CompartmentOccupancy func() Occupancy
 }
 
 // BeforeListTenancyRoot is the companion guard for a resource type that OCI only permits at

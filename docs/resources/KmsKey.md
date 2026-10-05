@@ -1,7 +1,7 @@
 # KmsKey
 
 - Scope: compartment
-- DependsOn: none
+- DependsOn: VaultSecret
 
 ## Properties
 

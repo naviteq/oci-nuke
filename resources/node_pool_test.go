@@ -2,17 +2,37 @@ package resources
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/containerengine"
+
+	"github.com/naviteq/oci-nuke/pkg/ocinuke"
+	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // stubNodePoolClient implements nodePoolClient against in-memory data -- zero network access,
 // mirroring stubInstanceClient's established precedent (resources/instance_test.go).
 type stubNodePoolClient struct {
-	items   []containerengine.NodePoolSummary
-	deleted []string
-	listErr error
+	items        []containerengine.NodePoolSummary
+	deleted      []string
+	listErr      error
+	workRequests []containerengine.WorkRequestSummary
+	wrErr        error
+	wrCalls      int
+}
+
+func (s *stubNodePoolClient) ListWorkRequests(
+	_ context.Context,
+	req containerengine.ListWorkRequestsRequest,
+) (containerengine.ListWorkRequestsResponse, error) {
+	s.wrCalls++
+	if req.ResourceType != containerengine.ListWorkRequestsResourceTypeNodepool {
+		return containerengine.ListWorkRequestsResponse{}, errors.New("unexpected resource type " + string(req.ResourceType))
+	}
+	return containerengine.ListWorkRequestsResponse{Items: s.workRequests}, s.wrErr
 }
 
 func (s *stubNodePoolClient) ListNodePools(
@@ -45,7 +65,7 @@ func TestNodePoolLister_List(t *testing.T) {
 		},
 	}
 
-	got, err := nodePoolList(context.Background(), stub, compartmentID)
+	got, err := nodePoolList(context.Background(), stub, compartmentID, false)
 	if err != nil {
 		t.Fatalf("nodePoolList() error = %v, want nil", err)
 	}
@@ -118,13 +138,64 @@ func TestNodePool_Filter(t *testing.T) {
 	}
 }
 
-// TestNodePool_SafetyTags_ZeroTimeCreated proves SafetyTags returns a zero time.Time, since
-// containerengine.NodePoolSummary has no TimeCreated field at all to read from.
-func TestNodePool_SafetyTags_ZeroTimeCreated(t *testing.T) {
-	r := &NodePool{}
-	_, _, createdAt := r.SafetyTags()
-	if !createdAt.IsZero() {
-		t.Errorf("SafetyTags() createdAt = %v, want zero time.Time", createdAt)
+// TestNodePoolList_CreationTimeFromWorkRequest: with min-age on, a node pool's creation time is
+// its NODEPOOL_CREATE work request's, so a fresh pool is too young to delete. Other operations
+// and RELATED resources are not mistaken for it.
+func TestNodePoolList_CreationTimeFromWorkRequest(t *testing.T) {
+	poolID, clusterID, compartmentID := "ocid1.nodepool.oc1..fresh", "ocid1.cluster.oc1..c", testCompartmentOCID
+	created := common.SDKTime{Time: time.Now().Add(-48 * time.Minute)}
+	updated := common.SDKTime{Time: time.Now().Add(-1 * time.Minute)}
+	stub := &stubNodePoolClient{
+		items: []containerengine.NodePoolSummary{{Id: &poolID, CompartmentId: &compartmentID}},
+		workRequests: []containerengine.WorkRequestSummary{
+			{
+				OperationType: containerengine.WorkRequestOperationTypeNodepoolCreate, TimeAccepted: &created,
+				Resources: []containerengine.WorkRequestResource{
+					{ActionType: containerengine.WorkRequestResourceActionTypeCreated, Identifier: &poolID},
+					{ActionType: containerengine.WorkRequestResourceActionTypeRelated, Identifier: &clusterID},
+				},
+			},
+			{
+				OperationType: containerengine.WorkRequestOperationTypeNodepoolUpdate, TimeAccepted: &updated,
+				Resources: []containerengine.WorkRequestResource{
+					{ActionType: containerengine.WorkRequestResourceActionTypeUpdated, Identifier: &poolID},
+				},
+			},
+		},
+	}
+
+	got, err := nodePoolList(context.Background(), stub, compartmentID, true)
+	if err != nil {
+		t.Fatalf("nodePoolList() error = %v", err)
+	}
+	freeform, defined, createdAt := got[0].(*NodePool).SafetyTags()
+	if !createdAt.Equal(created.Time) {
+		t.Fatalf("createdAt = %v, want the NODEPOOL_CREATE time %v", createdAt, created.Time)
+	}
+	evt := ocinuke.Evaluate(compartmentID, NodePoolResourceType, poolID, freeform, defined, createdAt,
+		ocinuke.SafetyFilterConfig{MinAge: 2 * time.Hour})
+	if evt == nil || evt.Reason != scope.ReasonTooYoung {
+		t.Errorf("Evaluate() = %+v, want too-young", evt)
+	}
+}
+
+// TestNodePoolList_NoLookupWithoutMinAge: with min-age off the work requests are not read.
+func TestNodePoolList_NoLookupWithoutMinAge(t *testing.T) {
+	stub := &stubNodePoolClient{}
+	if _, err := nodePoolList(context.Background(), stub, testCompartmentOCID, false); err != nil {
+		t.Fatalf("nodePoolList() error = %v", err)
+	}
+	if stub.wrCalls != 0 {
+		t.Errorf("ListWorkRequests called %d times, want 0", stub.wrCalls)
+	}
+}
+
+// TestNodePoolList_WorkRequestFailureFailsTheListing: min-age cannot be applied without the
+// creation time, so the listing fails rather than treating every pool as old.
+func TestNodePoolList_WorkRequestFailureFailsTheListing(t *testing.T) {
+	stub := &stubNodePoolClient{wrErr: errors.New("NotAuthorizedOrNotFound")}
+	if _, err := nodePoolList(context.Background(), stub, testCompartmentOCID, true); err == nil {
+		t.Fatal("nodePoolList() = nil error, want the work-request failure")
 	}
 }
 

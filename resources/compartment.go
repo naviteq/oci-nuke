@@ -5,6 +5,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	liberrors "github.com/ekristen/libnuke/pkg/errors"
@@ -27,6 +28,7 @@ type compartmentClient interface {
 	GetCompartment(ctx context.Context, req identity.GetCompartmentRequest) (identity.GetCompartmentResponse, error)
 	DeleteCompartment(ctx context.Context, req identity.DeleteCompartmentRequest) (identity.DeleteCompartmentResponse, error)
 	GetWorkRequest(ctx context.Context, req identity.GetWorkRequestRequest) (identity.GetWorkRequestResponse, error)
+	ListCompartments(ctx context.Context, req identity.ListCompartmentsRequest) (identity.ListCompartmentsResponse, error)
 }
 
 // CompartmentResourceType is the registry.Registration.Name for Compartment.
@@ -90,6 +92,7 @@ func (l *compartmentLister) List(ctx context.Context, opts interface{}) ([]resou
 		client:                   client,
 		compartment:              resp.Compartment,
 		hasBlocklistedDescendant: o.CompartmentHasBlocklistedDescendant,
+		occupancy:                o.CompartmentOccupancy,
 	}}, nil
 }
 
@@ -105,6 +108,12 @@ type Compartment struct {
 	compartment              identity.Compartment
 	workRequestID            string
 	hasBlocklistedDescendant bool
+	// occupancy and the four fields after it belong to waitUntilEmpty below.
+	occupancy        func() ocinuke.Occupancy
+	notEmpty         error
+	notEmptyReported bool
+	waitedForRun     bool
+	refusedByOCI     bool
 }
 
 // GetCompartmentID satisfies ocinuke.CompartmentScoped -- mandatory, checked by ocinuke.Register
@@ -187,6 +196,10 @@ func (r *Compartment) SafetyTags() (freeform, defined map[string]string, created
 // a plain error, routing to ItemStateFailed's genuinely-non-retryable path (06-RESEARCH.md Open
 // Question 2's adopted recommendation -- no distinct-error-code detection was added).
 func (r *Compartment) Remove(ctx context.Context) error {
+	if err := r.waitUntilEmpty(ctx); err != nil {
+		return holdOn409(err)
+	}
+
 	resp, err := r.client.DeleteCompartment(ctx, identity.DeleteCompartmentRequest{CompartmentId: r.compartment.Id})
 	if err != nil {
 		return holdOn409(err)
@@ -200,6 +213,93 @@ func (r *Compartment) Remove(ctx context.Context) error {
 	}
 	r.workRequestID = *resp.OpcWorkRequestId
 	return nil
+}
+
+// waitUntilEmpty keeps DeleteCompartment from being called while the compartment cannot be empty.
+// Without it, a compartment still being emptied by this run, or holding something that outlives
+// the run, gets one doomed work request after another until --max-wait-retries runs out.
+//
+// While anything else in the compartment is still in flight in this run it holds, without an API
+// call. Once nothing is, residue -- something the run reported it will not remove (a scheduled
+// deletion, a protected or too-young resource, backup residue), a config-filtered or failed item,
+// or a child compartment that is not DELETED -- makes it refuse. The refusal is a plain error, so
+// libnuke stops after its failed-item rounds instead of waiting out the budget, and it is reported
+// once as compartment-not-empty naming the residue. A later run deletes the compartment.
+//
+// When it does call DeleteCompartment and OCI's work request fails, HandleWait decides whether to
+// try again. If the run never had anything in flight here, the refusal is final for this run.
+//
+// A nil occupancy (a Compartment built outside a Nuke, as tests do) skips the check.
+func (r *Compartment) waitUntilEmpty(ctx context.Context) error {
+	if r.occupancy == nil {
+		return nil
+	}
+	if r.refusedByOCI {
+		return r.notEmpty
+	}
+
+	occ := r.occupancy()
+	if len(occ.InFlight) > 0 {
+		r.waitedForRun = true
+		return liberrors.ErrHoldResource(fmt.Sprintf(
+			"waiting for %d resource(s) in this compartment to finish deleting", len(occ.InFlight)))
+	}
+
+	children, err := r.liveChildren(ctx)
+	if err != nil {
+		return err
+	}
+	occ.Residue = append(occ.Residue, children...)
+	if len(occ.Residue) == 0 {
+		r.notEmpty = nil
+		return nil
+	}
+
+	detail := "still holds " + strings.Join(occ.Residue, "; ") + "; a later run deletes it once they are gone"
+	r.refuse(detail)
+	return r.notEmpty
+}
+
+// refuse records why the compartment stays, and reports it the first time.
+func (r *Compartment) refuse(detail string) {
+	r.workRequestID = ""
+	r.notEmpty = fmt.Errorf("compartment not empty: %s", detail)
+	if r.notEmptyReported {
+		return
+	}
+	r.notEmptyReported = true
+	ocinuke.ReportLeftover(ocinuke.CurrentReporter, &scope.SkipEvent{
+		Reason:        scope.ReasonCompartmentNotEmpty,
+		ResourceType:  CompartmentResourceType,
+		ResourceID:    *r.compartment.Id,
+		CompartmentID: *r.compartment.Id,
+		Detail:        detail,
+	})
+}
+
+// liveChildren lists this compartment's direct children that OCI has not finished deleting. A
+// child's own Nuke has already run by now (deepest-first), so anything still here stays.
+func (r *Compartment) liveChildren(ctx context.Context) ([]string, error) {
+	var out []string
+	req := identity.ListCompartmentsRequest{CompartmentId: r.compartment.Id}
+	for {
+		resp, err := r.client.ListCompartments(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("listing child compartments of %s: %w", *r.compartment.Id, err)
+		}
+		for i := range resp.Items {
+			child := resp.Items[i]
+			if child.LifecycleState == identity.CompartmentLifecycleStateDeleted {
+				continue
+			}
+			out = append(out, fmt.Sprintf("Compartment %s (%s, %s)",
+				derefOr(child.Id, "unknown"), derefOr(child.Name, "unnamed"), child.LifecycleState))
+		}
+		if resp.OpcNextPage == nil {
+			return out, nil
+		}
+		req.Page = resp.OpcNextPage
+	}
 }
 
 // HandleWait satisfies resource.HandleWaitHook -- the phase's central, genuinely novel mechanic
@@ -223,6 +323,15 @@ func (r *Compartment) Remove(ctx context.Context) error {
 // other/unknown status fails toward waiting (liberrors.ErrWaitResource), never toward a false
 // Failed.
 func (r *Compartment) HandleWait(ctx context.Context) error {
+	// HandleQueue calls this right after Remove() on a Failed item. When waitUntilEmpty refused,
+	// there is no work request to poll, and its reason must stay the item's reason.
+	if r.workRequestID == "" {
+		if r.notEmpty != nil {
+			return r.notEmpty
+		}
+		return fmt.Errorf("no compartment delete work request to poll")
+	}
+
 	resp, err := r.client.GetWorkRequest(ctx, identity.GetWorkRequestRequest{WorkRequestId: &r.workRequestID})
 	if err != nil {
 		return err
@@ -251,10 +360,19 @@ func (r *Compartment) HandleWait(ctx context.Context) error {
 	case identity.WorkRequestStatusSucceeded:
 		return nil
 	case identity.WorkRequestStatusFailed:
+		message := "no reason given"
 		if len(resp.Errors) > 0 && resp.Errors[0].Message != nil {
-			return fmt.Errorf("compartment delete work request failed: %s", *resp.Errors[0].Message)
+			message = *resp.Errors[0].Message
 		}
-		return fmt.Errorf("compartment delete work request failed")
+		// Nothing of this run's was in the compartment, so nothing is about to leave it either:
+		// what OCI found is outside the run's reach (another region, an unsupported type), and
+		// asking again only repeats the refusal until the wait budget is gone.
+		if r.occupancy != nil && !r.waitedForRun {
+			r.refusedByOCI = true
+			r.refuse("OCI refused the delete: " + message + "; a later run tries again")
+			return r.notEmpty
+		}
+		return fmt.Errorf("compartment delete work request failed: %s", message)
 	default:
 		return liberrors.ErrWaitResource("compartment delete work request status " + string(resp.Status))
 	}

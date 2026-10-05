@@ -488,3 +488,47 @@ func TestDeleteCompartmentsEnabledFromSettings_WrongType(t *testing.T) {
 		t.Errorf("error = %q, want it to name the wrong type (string)", err.Error())
 	}
 }
+
+// TestSecretDeletionWindowDaysFromSettings covers the secret window: one day by default, read from
+// its own key under settings.vault, independent of the vault window beside it, and held to OCI's
+// one-to-thirty-day range.
+func TestSecretDeletionWindowDaysFromSettings(t *testing.T) {
+	const key = "secret-deletion-window-days"
+
+	cases := []struct {
+		name    string
+		s       *settings.Settings
+		want    int
+		wantErr bool
+	}{
+		{name: "nil settings", s: nil, want: 1},
+		{
+			name: "vault window alone does not move it",
+			s:    &settings.Settings{testVaultSettingsKey: &settings.Setting{testVaultDeletionWindowDaysKey: 14}},
+			want: 1,
+		},
+		{name: "explicit", s: &settings.Settings{testVaultSettingsKey: &settings.Setting{key: 3}}, want: 3},
+		{name: "whole-number float from YAML", s: &settings.Settings{testVaultSettingsKey: &settings.Setting{key: 30.0}}, want: 30},
+		{name: "zero", s: &settings.Settings{testVaultSettingsKey: &settings.Setting{key: 0}}, wantErr: true},
+		{name: "above ceiling", s: &settings.Settings{testVaultSettingsKey: &settings.Setting{key: 31}}, wantErr: true},
+		{name: "wrong type", s: &settings.Settings{testVaultSettingsKey: &settings.Setting{key: "1"}}, wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			days, err := ocinuke.SecretDeletionWindowDaysFromSettings(tc.s)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "settings.vault."+key) {
+					t.Fatalf("err = %v, want one naming settings.vault.%s", err, key)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if days != tc.want {
+				t.Errorf("days = %d, want %d", days, tc.want)
+			}
+		})
+	}
+}

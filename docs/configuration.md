@@ -118,8 +118,8 @@ The reasoning, and the alternatives it rejects, are in
 
 - It cannot make the tenancy root a valid target. `tenancy-root-types` admits named types at the
   root; it does not let a run target it.
-- It cannot shorten OCI's 7–30 day vault deletion window. Vaults are scheduled for deletion and
-  then reported as residue, not as failures.
+- It cannot shorten OCI's 7–30 day vault and key deletion window, or the 1–30 day secret one. They
+  are scheduled for deletion and then reported as residue, not as failures.
 - It cannot turn compartment deletion back off once enabled: `--delete-compartments` can only
   turn `settings.compartment.delete` on, never override it back off.
 
@@ -218,5 +218,6 @@ map of list of `filter`.
 | Key | Type | Required | Constraints |
 |---|---|---|---|
 | `deletion-window-days` | integer | no | between 7 and 30 |
+| `secret-deletion-window-days` | integer | no | between 1 and 30 |
 
 <!-- /generated: config-schema -->

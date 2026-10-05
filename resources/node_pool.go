@@ -2,7 +2,8 @@
 // resource type with libnuke's registry. NodePool is hand-written for TWO independent reasons,
 // distinct from Cluster's single reason (resources/cluster.go) -- do not conflate them:
 //  1. containerengine.NodePoolSummary has NO TimeCreated field at all (verified against
-//     oci-go-sdk/v65/containerengine/node_pool_summary.go this session), same gap as Cluster.
+//     oci-go-sdk/v65/containerengine/node_pool_summary.go); its creation time comes from the
+//     NODEPOOL_CREATE work request instead, see nodePoolCreationTimes.
 //  2. UNLIKE Cluster, NodePoolSummary has NO Summary-suffixed lifecycle-enum alias at all --
 //     only the plain NodePoolLifecycleStateEnum exists, so NodePool fails both
 //     generator-friendliness checks Cluster only fails one of.
@@ -27,6 +28,7 @@ import (
 type nodePoolClient interface {
 	ListNodePools(ctx context.Context, req containerengine.ListNodePoolsRequest) (containerengine.ListNodePoolsResponse, error)
 	DeleteNodePool(ctx context.Context, req containerengine.DeleteNodePoolRequest) (containerengine.DeleteNodePoolResponse, error)
+	ListWorkRequests(ctx context.Context, req containerengine.ListWorkRequestsRequest) (containerengine.ListWorkRequestsResponse, error)
 }
 
 // NodePoolResourceType is the registry.Registration.Name for NodePool.
@@ -63,7 +65,7 @@ func (l *nodePoolLister) List(ctx context.Context, opts interface{}) ([]resource
 		return nil, fmt.Errorf("constructing ContainerEngine client for %s: %w", o.Region, err)
 	}
 
-	return nodePoolList(ctx, client, o.CompartmentID)
+	return nodePoolList(ctx, client, o.CompartmentID, o.SafetyFilter.MinAge > 0)
 }
 
 // nodePoolList paginates containerengine.ListNodePools and wraps every returned item as a
@@ -73,11 +75,23 @@ func (l *nodePoolLister) List(ctx context.Context, opts interface{}) ([]resource
 // covered by Phase 4's unconditional Instance enumeration, with no OKE-specific type). Isolated
 // from ocinuke.ListerOpts/pkg/clients.Cache on purpose -- this is what the list test below
 // exercises against a stub, with zero network access.
+//
+// With withCreationTime set -- only when settings.protect.min-age is on -- each node pool also
+// gets its creation time, read from the NODEPOOL_CREATE work requests of the compartment.
 func nodePoolList(
 	ctx context.Context,
 	client nodePoolClient,
 	compartmentID string,
+	withCreationTime bool,
 ) ([]resource.Resource, error) {
+	var created map[string]time.Time
+	if withCreationTime {
+		var err error
+		if created, err = nodePoolCreationTimes(ctx, client, compartmentID); err != nil {
+			return nil, err
+		}
+	}
+
 	var out []resource.Resource
 	req := containerengine.ListNodePoolsRequest{CompartmentId: &compartmentID}
 	for {
@@ -86,7 +100,11 @@ func nodePoolList(
 			return nil, fmt.Errorf("listing NodePool in %s: %w", compartmentID, err)
 		}
 		for i := range resp.Items {
-			out = append(out, &NodePool{client: client, nodePool: resp.Items[i]})
+			np := &NodePool{client: client, nodePool: resp.Items[i]}
+			if np.nodePool.Id != nil {
+				np.createdAt = created[*np.nodePool.Id]
+			}
+			out = append(out, np)
 		}
 		if resp.OpcNextPage == nil {
 			break
@@ -96,10 +114,43 @@ func nodePoolList(
 	return out, nil
 }
 
-// NodePool wraps one containerengine.NodePoolSummary.
+// nodePoolCreationTimes maps each node pool OCID to the time its NODEPOOL_CREATE work request was
+// accepted. NodePoolSummary carries no creation time of its own; the work request is the only
+// record of one. A failure here fails the listing: min-age cannot be applied without it.
+func nodePoolCreationTimes(ctx context.Context, client nodePoolClient, compartmentID string) (map[string]time.Time, error) {
+	created := map[string]time.Time{}
+	req := containerengine.ListWorkRequestsRequest{
+		CompartmentId: &compartmentID,
+		ResourceType:  containerengine.ListWorkRequestsResourceTypeNodepool,
+	}
+	for {
+		resp, err := client.ListWorkRequests(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("listing NodePool work requests in %s (needed for min-age): %w", compartmentID, err)
+		}
+		for _, wr := range resp.Items {
+			if wr.OperationType != containerengine.WorkRequestOperationTypeNodepoolCreate || wr.TimeAccepted == nil {
+				continue
+			}
+			for _, res := range wr.Resources {
+				if res.ActionType == containerengine.WorkRequestResourceActionTypeCreated && res.Identifier != nil {
+					created[*res.Identifier] = wr.TimeAccepted.Time
+				}
+			}
+		}
+		if resp.OpcNextPage == nil {
+			return created, nil
+		}
+		req.Page = resp.OpcNextPage
+	}
+}
+
+// NodePool wraps one containerengine.NodePoolSummary, plus its creation time when the lister
+// looked it up.
 type NodePool struct {
-	client   nodePoolClient
-	nodePool containerengine.NodePoolSummary
+	client    nodePoolClient
+	nodePool  containerengine.NodePoolSummary
+	createdAt time.Time
 }
 
 // GetCompartmentID satisfies ocinuke.CompartmentScoped -- mandatory, checked by ocinuke.Register
@@ -143,15 +194,13 @@ func (r *NodePool) Filter() error {
 	}
 }
 
-// SafetyTags satisfies ocinuke.SafetyEvaluated, returning this resource's freeform tags, its
-// already-flattened ("<namespace>.<key>") defined tags, and a zero time.Time for createdAt.
-// containerengine.NodePoolSummary has NO TimeCreated-shaped field at all (verified this session,
-// oci-go-sdk/v65/containerengine/node_pool_summary.go) -- see resources/cluster.go's SafetyTags
-// doc comment for the full reasoning; the same zero-value-is-never-falsely-protected guarantee
-// applies here.
+// SafetyTags satisfies ocinuke.SafetyEvaluated. The creation time is the one nodePoolList found
+// in the pool's NODEPOOL_CREATE work request. It stays zero -- old, so not protected -- when
+// min-age is off and nothing was looked up, or when OCI no longer keeps that work request, which
+// it only stops doing long after any min-age a sandbox would set.
 func (r *NodePool) SafetyTags() (freeform, defined map[string]string, createdAt time.Time) {
 	x := r.nodePool
-	return x.FreeformTags, flattenDefinedTags(x.DefinedTags), time.Time{}
+	return x.FreeformTags, flattenDefinedTags(x.DefinedTags), r.createdAt
 }
 
 // Remove is a direct delete call -- protect-by-tag/min-age protection is now applied at SCAN

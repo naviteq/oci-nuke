@@ -2170,13 +2170,13 @@ func TestBuildArtifact_HashIndependentOfCallOrderAndGeneratedAt(t *testing.T) {
 	bodyA := plan.Body{SchemaVersion: plan.SchemaVersion, Entries: []plan.Entry{entryA, entryB}}
 	bodyB := plan.Body{SchemaVersion: plan.SchemaVersion, Entries: []plan.Entry{entryB, entryA}}
 
-	first, err := buildArtifact(bodyA, nil)
+	first, err := buildArtifact(bodyA, nil, nil)
 	if err != nil {
-		t.Fatalf("buildArtifact(bodyA, nil): %v", err)
+		t.Fatalf("buildArtifact(bodyA, nil, nil): %v", err)
 	}
-	second, err := buildArtifact(bodyB, nil)
+	second, err := buildArtifact(bodyB, nil, nil)
 	if err != nil {
-		t.Fatalf("buildArtifact(bodyB, nil): %v", err)
+		t.Fatalf("buildArtifact(bodyB, nil, nil): %v", err)
 	}
 
 	if first.Hash != second.Hash {

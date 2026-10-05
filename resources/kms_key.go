@@ -26,10 +26,9 @@ func init() {
 		Scope:    ocinuke.CompartmentScope,
 		Resource: &KmsKey{},
 		Lister:   &kmsKeyLister{},
-		// DependsOn is intentionally empty -- Vault (resources/vault.go) declares the KmsKey
-		// edge on ITS OWN registration ("DependsOn is always declared by the type that has the
-		// dependency, never on the type depended upon" -- resources/instance.go's own init()
-		// comment). Declaring it here too would be a duplicate, contradictory edge.
+		// A secret is encrypted by a key, so the key waits for secrets. Vault declares its own
+		// KmsKey edge (resources/vault.go).
+		DependsOn: []string{VaultSecretResourceType},
 	}, ocinuke.CurrentScope, ocinuke.CurrentReporter)
 }
 

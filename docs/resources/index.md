@@ -1,6 +1,6 @@
 # Resource types
 
-`oci-nuke` covers **57** resource types. This page is generated from the
+`oci-nuke` covers **58** resource types. This page is generated from the
 registry by `tools/generate-docs`, so it cannot fall behind the code.
 
 Use a name from the first column with `resource-types.includes` or
@@ -62,6 +62,7 @@ Use a name from the first column with `resource-types.includes` or
 | [TagDefault](TagDefault.md) |  |
 | [TagNamespace](TagNamespace.md) |  |
 | [Vault](Vault.md) |  |
+| [VaultSecret](VaultSecret.md) |  |
 | [Vcn](Vcn.md) |  |
 | [Vlan](Vlan.md) |  |
 | [VolumeAttachment](VolumeAttachment.md) |  |

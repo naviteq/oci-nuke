@@ -1,7 +1,7 @@
 // Package resources is blank-imported by main.go and pkg/commands/list to register every OCI
 // resource type with libnuke's registry. Cluster is hand-written rather than scaffolded by
-// cmd/gen-resource: containerengine.ClusterSummary has NO TimeCreated field at all (verified
-// against oci-go-sdk/v65/containerengine/cluster_summary.go this session), which breaks the
+// cmd/gen-resource: containerengine.ClusterSummary has no top-level TimeCreated field (it sits
+// under Metadata, see oci-go-sdk/v65/containerengine/cluster_summary.go), which breaks the
 // generator template's SafetyTags()/Properties() bodies (both unconditionally dereference
 // x.TimeCreated.Time) -- see SafetyTags() below. This is the only reason Cluster is
 // hand-written; ClusterSummary DOES have a Summary-suffixed lifecycle-enum alias
@@ -144,17 +144,15 @@ func (r *Cluster) Filter() error {
 	}
 }
 
-// SafetyTags satisfies ocinuke.SafetyEvaluated, returning this resource's freeform tags, its
-// already-flattened ("<namespace>.<key>") defined tags, and a zero time.Time for createdAt.
-// containerengine.ClusterSummary has NO TimeCreated-shaped field at all (verified this session,
-// oci-go-sdk/v65/containerengine/cluster_summary.go) -- a third, more extreme case than
-// resources/support.go's timeCreatedOrZero (that helper nil-checks a field that EXISTS; here the
-// field does not exist at all, so the zero value is hardcoded directly). A zero time.Time is
-// never falsely "protected" by a min-age check (see timeCreatedOrZero's own doc comment for the
-// exact guarantee this relies on).
+// SafetyTags satisfies ocinuke.SafetyEvaluated. The creation time is Metadata.TimeCreated;
+// ClusterSummary has no top-level one, which once made this return a zero time and left every
+// cluster outside settings.protect.min-age. A record without metadata still gets zero.
 func (r *Cluster) SafetyTags() (freeform, defined map[string]string, createdAt time.Time) {
 	x := r.cluster
-	return x.FreeformTags, flattenDefinedTags(x.DefinedTags), time.Time{}
+	if x.Metadata != nil {
+		createdAt = timeCreatedOrZero(x.Metadata.TimeCreated)
+	}
+	return x.FreeformTags, flattenDefinedTags(x.DefinedTags), createdAt
 }
 
 // Remove is a direct delete call -- protect-by-tag/min-age protection is now applied at SCAN

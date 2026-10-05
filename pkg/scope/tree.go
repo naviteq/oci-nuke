@@ -110,6 +110,11 @@ func (t *Tree) LifecycleState(id string) (string, bool) {
 	return string(c.LifecycleState), true
 }
 
+// Children returns the direct children of id in any lifecycle state, DELETED included.
+func (t *Tree) Children(id string) []string {
+	return t.childrenOf[id]
+}
+
 // NonActiveCompartment is a node Resolve pruned for not being ACTIVE, carrying the state it was
 // in -- the state is the whole point: DELETING and CREATING call for different operator actions.
 type NonActiveCompartment struct {

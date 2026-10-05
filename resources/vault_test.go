@@ -240,15 +240,15 @@ func TestVault_Properties(t *testing.T) {
 	}
 }
 
-// TestVault_DependsOn_KmsKey proves Vault's registration declares DependsOn: ["KmsKey"] --
-// 05-CONTEXT.md's locked no-cascade decision, verified against the real, package-init-installed
-// registration.
+// TestVault_DependsOn_KmsKey proves Vault's registration declares DependsOn: ["KmsKey",
+// "VaultSecret"] -- 05-CONTEXT.md's locked no-cascade decision, extended to secrets, verified
+// against the real, package-init-installed registration.
 func TestVault_DependsOn_KmsKey(t *testing.T) {
 	reg := registry.GetRegistration(VaultResourceType)
 	if reg == nil {
 		t.Fatalf("no registration found for %q", VaultResourceType)
 	}
-	want := []string{"KmsKey"}
+	want := []string{"KmsKey", VaultSecretResourceType}
 	if len(reg.DependsOn) != len(want) {
 		t.Fatalf("Vault DependsOn = %v (len %d), want %v (len %d)", reg.DependsOn, len(reg.DependsOn), want, len(want))
 	}

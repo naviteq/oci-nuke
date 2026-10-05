@@ -21,6 +21,7 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 	"github.com/oracle/oci-go-sdk/v65/ons"
 	"github.com/oracle/oci-go-sdk/v65/streaming"
+	"github.com/oracle/oci-go-sdk/v65/vault"
 )
 
 // Cache is a region-keyed cache of OCI SDK service clients. OCI bakes the region into a
@@ -572,6 +573,32 @@ func (c *Cache) KmsVault(region string) (keymanagement.KmsVaultClient, error) {
 	client, err := keymanagement.NewKmsVaultClientWithConfigurationProvider(c.provider)
 	if err != nil {
 		return keymanagement.KmsVaultClient{}, err
+	}
+	if region != "" {
+		client.SetRegion(region)
+	}
+	client.SetCustomClientConfiguration(common.CustomClientConfiguration{RetryPolicy: &c.retry})
+	client.HTTPClient = &boundedDispatcher{inner: client.HTTPClient, sem: c.limiter}
+
+	c.clients[key] = client
+	return client, nil
+}
+
+// Vaults returns a cached vault.VaultsClient for region, constructing and caching one on first use.
+// Covers ListSecrets/ScheduleSecretDeletion (VaultSecret). Secrets are the Secrets service's own
+// API, region-keyed, not addressed through a vault's management endpoint the way keys are.
+func (c *Cache) Vaults(region string) (vault.VaultsClient, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	key := "vaults/" + region
+	if existing, ok := c.clients[key]; ok {
+		return existing.(vault.VaultsClient), nil
+	}
+
+	client, err := vault.NewVaultsClientWithConfigurationProvider(c.provider)
+	if err != nil {
+		return vault.VaultsClient{}, err
 	}
 	if region != "" {
 		client.SetRegion(region)

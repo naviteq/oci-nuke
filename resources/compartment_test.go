@@ -34,6 +34,16 @@ type stubCompartmentClient struct {
 	getCompartmentFn    func(ctx context.Context, req identity.GetCompartmentRequest) (identity.GetCompartmentResponse, error)
 	deleteCompartmentFn func(ctx context.Context, req identity.DeleteCompartmentRequest) (identity.DeleteCompartmentResponse, error)
 	getWorkRequestFn    func(ctx context.Context, req identity.GetWorkRequestRequest) (identity.GetWorkRequestResponse, error)
+	listCompartmentsFn  func(ctx context.Context, req identity.ListCompartmentsRequest) (identity.ListCompartmentsResponse, error)
+}
+
+func (s *stubCompartmentClient) ListCompartments(
+	ctx context.Context, req identity.ListCompartmentsRequest,
+) (identity.ListCompartmentsResponse, error) {
+	if s.listCompartmentsFn != nil {
+		return s.listCompartmentsFn(ctx, req)
+	}
+	return identity.ListCompartmentsResponse{}, nil
 }
 
 func (s *stubCompartmentClient) GetCompartment(
@@ -398,5 +408,185 @@ func TestCompartment_HandleWait_SucceededReportsNothing(t *testing.T) {
 	}
 	if len(reported) != 0 {
 		t.Errorf("a SUCCEEDED work request reported %d leftovers, want none: %+v", len(reported), reported)
+	}
+}
+
+// gatedCompartment builds a Compartment whose Remove() goes through waitUntilEmpty, counting the
+// calls it makes to OCI.
+func gatedCompartment(occ ocinuke.Occupancy, children []identity.Compartment) (r *Compartment, deletes, lists *int) {
+	deletes, lists = new(int), new(int)
+	id := testCompartmentOwnOCID
+	client := &stubCompartmentClient{
+		deleteCompartmentFn: func(context.Context, identity.DeleteCompartmentRequest) (identity.DeleteCompartmentResponse, error) {
+			*deletes++
+			wrID := testWorkRequestOCID
+			return identity.DeleteCompartmentResponse{OpcWorkRequestId: &wrID}, nil
+		},
+		listCompartmentsFn: func(context.Context, identity.ListCompartmentsRequest) (identity.ListCompartmentsResponse, error) {
+			*lists++
+			return identity.ListCompartmentsResponse{Items: children}, nil
+		},
+	}
+	r = &Compartment{
+		client:      client,
+		compartment: identity.Compartment{Id: &id},
+		occupancy:   func() ocinuke.Occupancy { return occ },
+	}
+	return r, deletes, lists
+}
+
+// TestCompartment_Remove_HoldsWhileTheRunIsStillEmptyingIt: nothing is asked of OCI while other
+// resources of the compartment are still in flight, and the item holds rather than fails.
+func TestCompartment_Remove_HoldsWhileTheRunIsStillEmptyingIt(t *testing.T) {
+	r, deletes, lists := gatedCompartment(ocinuke.Occupancy{InFlight: []string{"Subnet ocid1.subnet.oc1..a"}}, nil)
+
+	err := r.Remove(context.Background())
+
+	var hold liberrors.ErrHoldResource
+	if !errors.As(err, &hold) {
+		t.Fatalf("Remove() = %v, want ErrHoldResource", err)
+	}
+	if *deletes != 0 || *lists != 0 {
+		t.Errorf("DeleteCompartment called %d, ListCompartments %d times; want neither", *deletes, *lists)
+	}
+}
+
+// TestCompartment_Remove_RefusesOverResidue: once nothing is in flight, known residue means no
+// DeleteCompartment, a plain error that stays the item's reason through HandleWait, and exactly
+// one compartment-not-empty report however many rounds ask again.
+func TestCompartment_Remove_RefusesOverResidue(t *testing.T) {
+	var got []*scope.SkipEvent
+	restore := ocinuke.SetRunContext(func(string) bool { return true }, func(evt *scope.SkipEvent) {
+		got = append(got, evt)
+	})
+	defer restore()
+
+	residue := "Vault ocid1.vault.oc1..v (scheduled-deletion: vault already scheduled for deletion)"
+	r, deletes, _ := gatedCompartment(ocinuke.Occupancy{Residue: []string{residue}}, nil)
+
+	for round := 0; round < 3; round++ {
+		err := r.Remove(context.Background())
+		var hold liberrors.ErrHoldResource
+		if err == nil || errors.As(err, &hold) {
+			t.Fatalf("round %d: Remove() = %v, want a plain error", round, err)
+		}
+		if waitErr := r.HandleWait(context.Background()); waitErr == nil || waitErr.Error() != err.Error() {
+			t.Fatalf("round %d: HandleWait() = %v, want Remove()'s error %v", round, waitErr, err)
+		}
+	}
+
+	if *deletes != 0 {
+		t.Errorf("DeleteCompartment called %d times, want 0", *deletes)
+	}
+	if len(got) != 1 {
+		t.Fatalf("reported %d events, want 1", len(got))
+	}
+	if got[0].Reason != scope.ReasonCompartmentNotEmpty || !strings.Contains(got[0].Detail, residue) {
+		t.Errorf("event = %+v, want compartment-not-empty naming %q", got[0], residue)
+	}
+}
+
+// TestCompartment_Remove_RefusesOverALiveChild: a child compartment that is not DELETED is
+// residue; a DELETED one is not.
+func TestCompartment_Remove_RefusesOverALiveChild(t *testing.T) {
+	restore := ocinuke.SetRunContext(func(string) bool { return true }, func(*scope.SkipEvent) {})
+	defer restore()
+
+	liveID, liveName := "ocid1.compartment.oc1..live", "kept"
+	goneID, goneName := "ocid1.compartment.oc1..gone", "gone"
+	children := []identity.Compartment{
+		{Id: &liveID, Name: &liveName, LifecycleState: identity.CompartmentLifecycleStateActive},
+		{Id: &goneID, Name: &goneName, LifecycleState: identity.CompartmentLifecycleStateDeleted},
+	}
+	r, deletes, _ := gatedCompartment(ocinuke.Occupancy{}, children)
+
+	err := r.Remove(context.Background())
+	if err == nil || !strings.Contains(err.Error(), liveID) || strings.Contains(err.Error(), goneID) {
+		t.Fatalf("Remove() = %v, want an error naming %s and not %s", err, liveID, goneID)
+	}
+	if *deletes != 0 {
+		t.Errorf("DeleteCompartment called %d times, want 0", *deletes)
+	}
+}
+
+// TestCompartment_Remove_DeletesOnceEmpty: no in-flight work, no residue, no live child -- the
+// delete goes out as before.
+func TestCompartment_Remove_DeletesOnceEmpty(t *testing.T) {
+	r, deletes, _ := gatedCompartment(ocinuke.Occupancy{}, nil)
+
+	if err := r.Remove(context.Background()); err != nil {
+		t.Fatalf("Remove() = %v, want nil", err)
+	}
+	if *deletes != 1 || r.workRequestID != testWorkRequestOCID {
+		t.Errorf("DeleteCompartment called %d times, workRequestID %q; want 1 and %q", *deletes, r.workRequestID, testWorkRequestOCID)
+	}
+}
+
+// failingWorkRequests makes every DeleteCompartment work request of r end FAILED.
+func failingWorkRequests(r *Compartment) {
+	msg := "compartment has resources in il-jerusalem-1"
+	r.client.(*stubCompartmentClient).getWorkRequestFn = func(
+		context.Context, identity.GetWorkRequestRequest,
+	) (identity.GetWorkRequestResponse, error) {
+		return identity.GetWorkRequestResponse{WorkRequest: identity.WorkRequest{
+			Status: identity.WorkRequestStatusFailed,
+			Errors: []identity.WorkRequestError{{Message: &msg}},
+		}}, nil
+	}
+}
+
+// TestCompartment_FailedDelete_IsFinalWhenTheRunHadNothingThere: OCI's refusal of a compartment
+// the run never had to wait for is reported once and not asked again.
+func TestCompartment_FailedDelete_IsFinalWhenTheRunHadNothingThere(t *testing.T) {
+	var got []*scope.SkipEvent
+	restore := ocinuke.SetRunContext(func(string) bool { return true }, func(evt *scope.SkipEvent) { got = append(got, evt) })
+	defer restore()
+
+	r, deletes, _ := gatedCompartment(ocinuke.Occupancy{}, nil)
+	failingWorkRequests(r)
+
+	if err := r.Remove(context.Background()); err != nil {
+		t.Fatalf("Remove() = %v, want nil", err)
+	}
+	for round := 0; round < 3; round++ {
+		if err := r.HandleWait(context.Background()); err == nil || !strings.Contains(err.Error(), "il-jerusalem-1") {
+			t.Fatalf("round %d: HandleWait() = %v, want OCI's reason", round, err)
+		}
+		if err := r.Remove(context.Background()); err == nil {
+			t.Fatalf("round %d: Remove() = nil, want the refusal again", round)
+		}
+	}
+
+	if *deletes != 1 {
+		t.Errorf("DeleteCompartment called %d times, want 1", *deletes)
+	}
+	if len(got) != 1 || got[0].Reason != scope.ReasonCompartmentNotEmpty {
+		t.Errorf("events = %+v, want one compartment-not-empty", got)
+	}
+}
+
+// TestCompartment_FailedDelete_IsRetriedAfterTheRunEmptiedIt: when the run was still emptying the
+// compartment, a failed delete may be OCI catching up, so it is issued again.
+func TestCompartment_FailedDelete_IsRetriedAfterTheRunEmptiedIt(t *testing.T) {
+	occ := ocinuke.Occupancy{InFlight: []string{"Subnet s"}}
+	r, deletes, _ := gatedCompartment(occ, nil)
+	r.occupancy = func() ocinuke.Occupancy { return occ }
+	failingWorkRequests(r)
+
+	if err := r.Remove(context.Background()); err == nil {
+		t.Fatal("Remove() = nil while a subnet is in flight, want a hold")
+	}
+	occ = ocinuke.Occupancy{}
+	for round := 0; round < 2; round++ {
+		if err := r.Remove(context.Background()); err != nil {
+			t.Fatalf("round %d: Remove() = %v, want nil", round, err)
+		}
+		if err := r.HandleWait(context.Background()); err == nil {
+			t.Fatalf("round %d: HandleWait() = nil, want the failure", round)
+		}
+	}
+
+	if *deletes != 2 {
+		t.Errorf("DeleteCompartment called %d times, want 2", *deletes)
 	}
 }

@@ -3,9 +3,14 @@ package resources
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/ekristen/libnuke/pkg/registry"
+	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/containerengine"
+
+	"github.com/naviteq/oci-nuke/pkg/ocinuke"
+	"github.com/naviteq/oci-nuke/pkg/scope"
 )
 
 // stubClusterClient implements clusterClient against in-memory data -- zero network access,
@@ -115,13 +120,24 @@ func TestCluster_Filter(t *testing.T) {
 	}
 }
 
-// TestCluster_SafetyTags_ZeroTimeCreated proves SafetyTags returns a zero time.Time, since
-// containerengine.ClusterSummary has no TimeCreated field at all to read from.
-func TestCluster_SafetyTags_ZeroTimeCreated(t *testing.T) {
-	r := &Cluster{}
-	_, _, createdAt := r.SafetyTags()
-	if !createdAt.IsZero() {
-		t.Errorf("SafetyTags() createdAt = %v, want zero time.Time", createdAt)
+// TestCluster_SafetyTags_MetadataTimeCreated: the creation time comes from Metadata, so a
+// cluster younger than min-age is protected; a record without metadata still yields zero.
+func TestCluster_SafetyTags_MetadataTimeCreated(t *testing.T) {
+	created := common.SDKTime{Time: time.Now().Add(-48 * time.Minute)}
+	r := &Cluster{cluster: containerengine.ClusterSummary{Metadata: &containerengine.ClusterMetadata{TimeCreated: &created}}}
+
+	freeform, defined, createdAt := r.SafetyTags()
+	if !createdAt.Equal(created.Time) {
+		t.Fatalf("createdAt = %v, want %v", createdAt, created.Time)
+	}
+	evt := ocinuke.Evaluate(testCompartmentOCID, ClusterResourceType, testResourceOCID, freeform, defined, createdAt,
+		ocinuke.SafetyFilterConfig{MinAge: 2 * time.Hour})
+	if evt == nil || evt.Reason != scope.ReasonTooYoung {
+		t.Errorf("Evaluate() = %+v, want too-young", evt)
+	}
+
+	if _, _, zero := (&Cluster{}).SafetyTags(); !zero.IsZero() {
+		t.Errorf("createdAt without metadata = %v, want zero", zero)
 	}
 }
 
