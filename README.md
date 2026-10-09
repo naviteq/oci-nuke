@@ -203,9 +203,8 @@ See [`docs/resources/`](https://github.com/naviteq/oci-nuke/tree/main/docs/resou
 
 `oci-nuke` is built on [`ekristen/libnuke`](https://github.com/ekristen/libnuke) (MIT, the
 core extracted from `aws-nuke` v3, shared with `gcp-nuke` and `azure-nuke`) plus the official
-[`oracle/oci-go-sdk`](https://github.com/oracle/oci-go-sdk). It replaces `terraform-modules`'
-hand-rolled `scripts/oci-nuke.py` as Naviteq's OCI sandbox/CI teardown tool, and will be
-open-sourced under `naviteq/oci-nuke` once its scope is complete.
+[`oracle/oci-go-sdk`](https://github.com/oracle/oci-go-sdk). It replaced a hand-rolled Python
+script that Naviteq used to tear down its OCI sandboxes and CI compartments.
 
 `oci-nuke` currently registers **58 resource types** across compute, storage, networking,
 OKE/OCIR, databases, IAM, KMS and the platform services — plus the target compartment itself
@@ -215,21 +214,16 @@ documents each one.
 The delete path is not taken on trust. [`test/e2e`](./test/e2e/) seeds a
 throwaway compartment subtree with real OCI resources, runs `oci-nuke --no-dry-run` over it, and
 then asks OCI — through a different client, on a different code path — whether the subtree is
-actually empty. It runs on demand: manually, or by putting the `run-tests` label on a pull
-request, so the run tests that pull request's own code. It also asserts the negative: a run that cannot converge has to exit
-non-zero and say what is left. The script this tool replaced never crashed either; it exited 0
+actually empty. It also asserts the negative: a run that cannot converge has to exit non-zero and
+say what is left. The script this tool replaced never crashed either; it exited 0
 over a compartment that was still full.
 
 <!-- --8<-- [start:install] -->
 ## Installation
 
-Three routes, all producing the same binary: a release archive, a GitHub Action that installs
-that archive for you, and a container image.
-
-> **While this repository is private, every one of the three needs an authenticated token.**
-> The release assets are not anonymously downloadable, the action's `gh release download` needs
-> a token that can read them, and the `ghcr.io` package needs a `docker login`. There is no
-> unauthenticated install path today. NR-682 (public release) is what changes that.
+Four routes, all producing the same binary: a release archive, Distillery and a GitHub Action,
+both of which install that archive for you, and a container image. None of them needs a
+credential.
 
 ### 1. Release archive
 
@@ -243,11 +237,12 @@ The binary sits at the root of the archive, alongside `README.md`, `LICENSE` and
 — there is no wrapping directory.
 
 ```sh
-tag=v1.0.5
+tag=v2.2.0
 archive="oci-nuke-${tag}-linux-amd64.tar.gz"
+base="https://github.com/naviteq/oci-nuke/releases/download/${tag}"
 
-gh release download "${tag}" --repo naviteq/oci-nuke \
-  --pattern "${archive}" --pattern checksums.txt
+curl -fsSLO "${base}/${archive}"
+curl -fsSLO "${base}/checksums.txt"
 
 # Verify before extracting. On macOS use `shasum -a 256 -c -` instead of `sha256sum -c -`.
 grep "  ${archive}\$" checksums.txt | sha256sum -c -
@@ -257,19 +252,49 @@ sudo install -m 0755 oci-nuke /usr/local/bin/oci-nuke
 oci-nuke version
 ```
 
-### 2. GitHub Action
+### 2. Distillery
+
+[Distillery](https://dist.sh) (`dist`), by the author of libnuke, installs from this
+repository's releases directly. It picks the archive for the host's OS and architecture, checks
+it against `checksums.txt` and its cosign signature, and links the binary into
+`~/.distillery/bin`, which you add to `PATH` yourself; the installer does not.
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://get.dist.sh | sh
+export PATH="$HOME/.distillery/bin:$PATH"
+
+dist install naviteq/oci-nuke            # the latest release
+dist install naviteq/oci-nuke@v2.2.0     # an exact version
+oci-nuke version
+```
+
+`dist` checks the signature against the certificate that ships next to it in the same release,
+not against the identity the certificate was issued to. To confirm the archive was signed by this
+repository's release workflow, run `cosign` on the release's `checksums.txt` once, then compare
+the archive against it as in route 1:
+
+```sh
+cosign verify-blob checksums.txt \
+  --certificate checksums.txt.pem --signature checksums.txt.sig \
+  --certificate-identity-regexp '^https://github\.com/naviteq/oci-nuke/\.github/workflows/goreleaser\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Intel macOS has no archive to pick, so `dist install` fails there.
+
+### 3. GitHub Action
 
 `action.yml` at the root of this repository is a composite action that does the download,
 checksum verification and `PATH` setup above:
 
 ```yaml
-- uses: naviteq/oci-nuke@v1.0.5
+- uses: naviteq/oci-nuke@v2.2.0
   with:
     # An exact vX.Y.Z tag. "latest" is rejected by name: plan and apply are separate
     # runs, and a moving ref would change the binary between them.
-    version: v1.0.5
-    # Needs read access to this repository's releases while it is private.
-    token: ${{ secrets.OCI_NUKE_TOKEN }}
+    version: v2.2.0
+    # The release is public, but the action insists on a token; the job's own one is enough.
+    token: ${{ github.token }}
 ```
 
 It verifies the archive's sha256 against the release's own `checksums.txt` and will not install
@@ -277,12 +302,10 @@ an archive it cannot verify. It does **not** verify the cosign signature: cosign
 GitHub-hosted runners, and installing it would be a step of its own. That is a follow-up, and
 the action's description says so rather than leaving the impression the signature was checked.
 
-### 3. Container image
+### 4. Container image
 
 ```sh
-echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_USER}" --password-stdin
-docker pull ghcr.io/naviteq/oci-nuke:v1.0.5
-docker run --rm ghcr.io/naviteq/oci-nuke:v1.0.5 version
+docker run --rm ghcr.io/naviteq/oci-nuke:v2.2.0 version
 ```
 
 The tag is a multi-arch manifest covering `linux/amd64` and `linux/arm64`, and the image is
@@ -294,8 +317,9 @@ cosign-signed by the same keyless workflow identity as the archives.
 go install github.com/naviteq/oci-nuke@latest
 ```
 
-Works only where the module is readable: `go install` resolves through `proxy.golang.org`,
-which cannot read a private repository. Until NR-682, use one of the three routes above.
+This builds the latest commit on `main`, not a release, and `oci-nuke version` prints `dev`. A tag
+cannot be selected this way: from `v2.0.0` on, Go expects the module path to end in `/v2`, and
+it does not. Use one of the four routes above for a pinned version.
 
 <!-- --8<-- [end:install] -->
 ## Configuration
@@ -339,8 +363,8 @@ actually want to protect.
 are enumerated once, in the home region, rather than once per region. If `regions` omits it,
 those five types are scanned nowhere and the plan simply has nothing to say about them. The
 run warns when this happens, but the config is the place to prevent it. The home region is
-often not the region your credentials connect through: the tenancy this tool is developed against connects via
-`eu-frankfurt-1` and is homed in `us-ashburn-1`.
+often not the region your credentials connect through: a tenancy homed in `us-ashburn-1` can
+perfectly well be used through `eu-frankfurt-1`.
 
 `settings` (protect-by-tag, minimum age, vault deletion window, compartment deletion) and
 per-compartment `filters` are optional; `config.example.yaml` documents both inline.
@@ -389,9 +413,9 @@ spared. The shared CI workflows pass it by default for exactly this reason.
 
 ## Authentication
 
-`--auth` picks the credential source; auto-detection is deliberately not offered for every
-method — see AUTH-04's own guarantee that a forced provider never silently falls back to
-another one. Five methods:
+`--auth` picks the credential source. Auto-detection is deliberately not offered for every
+method, and a provider chosen with `--auth` never silently falls back to another one. Five
+methods:
 
 | Method | `--auth` value | How it authenticates |
 |---|---|---|
@@ -416,11 +440,8 @@ exchange also requires a fresh, GitHub-issued OIDC JWT whose `sub` claim matches
 configured Identity Propagation Trust. That is a genuine, load-bearing difference from AWS's
 `sts:AssumeRoleWithWebIdentity`, which needs no stored secret at all — OCI's trust object
 validates the GitHub JWT's own signature directly, but a second, separate credential still gates
-who may even attempt the exchange. Restated in `REQUIREMENTS.md`'s AUTH-06 for exactly this
-reason: the original "without a long-lived key" wording was not achievable with any mechanism the
-pinned SDK supports, and this project does not quietly satisfy a requirement by redefining the
-words in it. See `docs/ci-identity-federation-setup.md` for the tenancy-side setup this property
-depends on.
+who may even attempt the exchange. See `docs/ci-identity-federation-setup.md` for the tenancy-side
+setup this property depends on.
 
 Required flags and environment variables:
 
@@ -472,10 +493,10 @@ most common failure of this path — a key flattened onto one line on its way th
 signing error inside the first list call.
 
 ```yaml
-- uses: naviteq/oci-nuke@v1.1.2
+- uses: naviteq/oci-nuke@v2.2.0
   with:
-    version: v1.1.2
-    token: ${{ secrets.GITHUB_TOKEN }}
+    version: v2.2.0
+    token: ${{ github.token }}
 
 - run: oci-nuke run --config oci-nuke.yaml --compartment-id "$COMPARTMENT_ID" --auth api-key
   env:
@@ -548,60 +569,14 @@ principal, or OKE workload identity), the command to run against a real sandbox 
 oci-nuke run --config config.yaml --compartment-id <compartment-ocid>
 ```
 
-This was exercised against a live OCI tenancy on 2026-08-10: the run authenticated from the
-config file, verified the tenancy through an Identity API round-trip, and scanned a sandbox
-compartment in twelve seconds — 163 entries across 20 resource types, 72 of them
-`would-remove` — then exited 0, deleting nothing. Two independent scans of the same
-compartment produced identical plan-artifact hashes while their `generated_at` timestamps
-differed, which is the property `--approved-plan` depends on.
-
-The tenancy gate was checked live in the same session: pointing the same credentials at a
-config whose `tenancy-id` did not match caused a non-zero exit before any listing, with the
-mismatch reported as both OCIDs.
+Two scans of an unchanged compartment produce the same plan hash even though their
+`generated_at` timestamps differ, which is the property `--approved-plan` depends on. Pointing
+credentials at a config whose `tenancy-id` does not match exits non-zero before any listing,
+and the error names both OCIDs.
 
 The dry-run and tenancy-gate guarantees are additionally proven by fake-provider tests
 (`resources_test/`, `pkg/ociauth/`, `pkg/commands/run/`) against the real, unmocked
 `libnuke.Nuke.Run()` control flow, so they stay checked in CI where no credentials exist.
-
-### Running this repository's own pipeline
-
-This repository nukes with the same two-phase pipeline it asks everyone else to use.
-`.github/workflows/nuke-plan.yml` is a dispatchable caller for the shared plan workflow;
-`.github/workflows/nuke-apply.yml` is the trampoline that turns an approval comment into a
-destructive run. Both pin `naviteq/github-actions` to one commit; the shared workflows
-re-validate every value the caller passes before anything irreversible happens.
-
-Its config is [`.github/oci-nuke.yaml`](./.github/oci-nuke.yaml), committed rather than held as
-a secret. Nothing in it is a credential — an OCID identifies a compartment, it does not open one,
-and the pipeline already publishes the target compartment's OCID in every audit issue. The
-compartment blocklist, on the other hand, is a safety control, and a safety control belongs where
-a reviewer can see it change.
-
-Start a read-only plan:
-
-```sh
-gh workflow run nuke-plan.yml --ref main \
-  -f compartment-id=<compartment-ocid> \
-  -f oidc-region=us-ashburn-1 \
-  -f regions-allowlist=us-ashburn-1,eu-frankfurt-1
-```
-
-The run authenticates with `--auth github-oidc`, scans, uploads the plan artifact and opens
-an audit issue naming every resource it would delete. Approving means commenting
-`/approve nuke-<plan-run-id>` on that issue; nothing is deleted until then, and the apply run
-rebuilds the same commit the plan recorded and re-hashes the artifact before it starts.
-
-Two things reliably surprise people the first time:
-
-- **GitHub only dispatches a workflow that exists on the default branch.** A caller edited on
-  a topic branch cannot be exercised there — `gh workflow run` answers `404 ... not found on
-  the default branch`. Changes to the plan caller have to land on `main` before they can run
-  at all, so a mistake in these two files surfaces at dispatch time, against a live tenancy.
-- **The compartment blocklist is checked upward, not just downward.** A target nested under a
-  blocklisted ancestor is refused, with the ancestor named:
-  `target compartment "<target>" is blocklisted (blocked by "<ancestor>")`. Blocklisting a
-  parent to protect one child protects every sibling too, so a sandbox that is expected to be
-  nukeable must not have a blocklisted compartment anywhere above it.
 
 ## Plan artifact
 
@@ -658,14 +633,12 @@ Every entry's `state` is one of:
 A `leftover` or `skipped` entry's `reason` is one of the thirteen `pkg/scope.RefusalReason`
 values: `out-of-scope`, `blocklisted`, `protected-by-tag`, `too-young`, `api-error`,
 `scheduled-deletion`, `retention-locked`, `dependency-not-satisfied`, `delete-protected`,
-`backup-residue`, `compartment-not-empty`, `compartment-not-active`, `compartment-still-deleting`
-— see "Safety Model" guarantee 8 above for the first four (already shipped by Phase 2);
-`api-error` through `dependency-not-satisfied` are Phase 3's leftover-specific additions;
-`delete-protected` and `backup-residue` are Phase 5 additions; and `compartment-not-empty` is
-Phase 6's addition, reported either when a compartment's own `DeleteCompartment` work request
-fails because it still contains resources (with the queue-derived blocker list — every
-still-present resource's type and OCID — in `detail`) or when it has a blocklisted descendant and
-was never attempted (see `pkg/scope/reason.go`'s own doc comment for the full reconciliation).
+`backup-residue`, `compartment-not-empty`, `compartment-not-active`, `compartment-still-deleting`.
+The first four are the skip reasons from "Safety Model" guarantee 8 above.
+`compartment-not-empty` is reported either when a compartment's own `DeleteCompartment` work
+request fails because it still contains resources (with the queue-derived blocker list — every
+still-present resource's type and OCID — in `detail`) or when it will not be empty and is never
+attempted (see `pkg/scope/reason.go`'s own doc comment for the full reconciliation).
 
 The last two distinguish two things `compartment-not-empty` used to absorb:
 
@@ -692,53 +665,33 @@ workflows, next to the `aws-nuke` set that has the same shape:
 | `oci-nuke-parse.yaml` | Parses the approval comment and the issue body for a caller's `issue_comment` trampoline. |
 | `oci-nuke-apply.yaml` | Re-fetches CODEOWNERS, re-verifies the plan hash, then runs destructively. |
 
-Inputs, secrets, org-level switches, install-source rules and the auto-approve model are documented
-once, with the workflows:
-[`docs/oci-nuke.md`](https://github.com/naviteq/github-actions/blob/main/docs/oci-nuke.md).
-Read that before wiring a caller. What follows here is specific to *this* repository or to the
-tool's own flags.
+Each workflow declares its inputs and secrets, with a description for every one, at the top of
+its file under `.github/workflows/`. Read those before wiring a caller. What follows here is
+about the tool's own flags and the guarantees the pipeline builds on them.
 
 The tenancy-side setup those workflows depend on — Confidential Application, Identity Propagation
-Trust, service users — is described in [`docs/ci-identity-federation-setup.md`](docs/ci-identity-federation-setup.md)
-and provisioned by the `terraform-oci-github-oidc` module in `naviteq/terraform-modules`.
+Trust, service users — is described in [`docs/ci-identity-federation-setup.md`](docs/ci-identity-federation-setup.md).
 
 ### The approval gate is an issue, not an Environment
 
-An earlier version of this pipeline gated the apply half on a GitHub Environment's required
-reviewers. **That gate could not exist here**: verified 2026-08-14, this repository's billing plan
-rejects every environment protection rule on a private repository — required reviewers and wait
-timer alike return HTTP 422. The Environments existed and neither was protected, so `--force` on the
-apply step had nothing standing behind it.
-
-The gate is now a GitHub issue, which works on any plan. `nuke-plan.yml` opens one; approving means
-commenting exactly `/approve oci-nuke-<plan-run-id>` on it; `nuke-apply.yml` picks that up via
-`issue_comment` and the shared apply workflow re-validates the comment, the commenter's membership in
-[`.github/CODEOWNERS`](.github/CODEOWNERS) on the default branch, and the plan hash before it deletes
-anything.
+The plan workflow opens a GitHub issue; approving means commenting exactly
+`/approve oci-nuke-<plan-run-id>` on it. The caller's `issue_comment` trampoline picks that up,
+and the shared apply workflow re-validates the comment, the commenter's membership in the
+caller's `.github/CODEOWNERS` on the default branch, and the plan hash before it deletes
+anything. An issue works on every GitHub plan, which required reviewers on an Environment do
+not: not every plan offers them to a private repository.
 
 **`.github/CODEOWNERS` is therefore load-bearing.** A handle listed there can authorise the
 destruction of a compartment subtree.
 
-### The Environments are still there, and still matter
+### The Environments still matter
 
 `plan_environment` and `apply_environment` remain required inputs, but they are not the gate. The
 Environment name lands in the OIDC token's `sub` claim, and the tenancy's Identity Propagation Trust
 matches a rule on exactly that string — so the Environment is what selects *which OCI principal the
 job becomes*. The plan principal holds `read` and physically cannot delete; the apply principal holds
-`manage`. Renaming an Environment silently breaks the match, which is why the module exposes
-`subject_claims` for comparison against a real token.
-
-### Running it by hand
-
-`.github/workflows/nuke-plan.yml` is a `workflow_dispatch` caller taking the target compartment, the
-OIDC region and the regions allowlist. It pins `source_ref` to the dispatched commit, because
-`go install github.com/naviteq/oci-nuke@<tag>` resolves through `proxy.golang.org`, which cannot
-read a private repository, and it reads the config from the `OCI_NUKE_CONFIG` secret so no tenancy
-identifier is committed.
-
-The plan run records which binary it used in the audit issue, and the trampoline passes that back to
-the apply run — so both halves use the same binary by construction rather than by remembering to pin
-the same value in two files.
+`manage`. Renaming an Environment silently breaks the match, so compare the trust rule against the
+`sub` claim of a real token after any rename.
 
 ### `--approved-plan`, `--max-plan-age`, and the doubled scan cost
 
@@ -768,13 +721,8 @@ intent:
 The safety check has moved from an interactive prompt to a named human approval plus a cryptographic
 hash comparison. For an unattended run that is a stronger guarantee, not a weaker one.
 
-It was not always true here. While the gate was a GitHub Environment's required reviewers — which
-this repository's billing plan refuses to create — half of that substitution was missing, and
-`--force` removed the confirmation rather than moving it. What kept it honest in the meantime was
-that nothing ever called the apply half. The issue-based gate is what closed it.
-
 Two things still have to hold for the paragraph above to be true, and neither is enforceable from
-this repository: `.github/CODEOWNERS` must list only people who should be able to authorise a
+the workflows: `.github/CODEOWNERS` must list only people who should be able to authorise a
 destructive run, and the approver must not be the person who dispatched the plan. The second is a
 convention, not a check.
 
@@ -784,25 +732,10 @@ The apply job's config still needs a non-empty compartment blocklist, exactly li
 `--no-dry-run` run — `oci-nuke` refuses to run at all when the config supplies no blocklist. CI
 apply inherits this guarantee automatically; it is not additional code this pipeline had to add.
 
-### What has and has not been proven
-
-**Proven live on 2026-08-19.** A dispatched plan run authenticated through
-`--auth github-oidc` as the federated plan principal — `authenticated to OCI method=github-oidc
-principal_ocid=ocid1.user.oc1..aaaaaaaagnj3z4c…`, the `oci-nuke-plan` service user — and stopped on
-the compartment blocklist. Both halves of that sentence are the point: the federation works, and so
-does the safety gate.
-
-**Not proven:** the apply half has never run. It has no human checkpoint on this repository (see the
-gate section above), and the destructive end-to-end proof belongs in its own harness, against a
-seeded compartment that exists to be destroyed, with an emptiness check that does not read
-`oci-nuke`'s own report.
-
 ### Fork-PR exposure is a caller-side responsibility
 
 The pipeline's secrets become reachable by whatever triggered the *calling* workflow. Never invoke
-it from a `pull_request`-triggered job with `secrets: inherit` where forks can open PRs. The full
-constraint, and the secret-shadowing hazard next to it, are in
-[`github-workflows/docs/oci-nuke.md`](https://github.com/naviteq/github-actions/blob/main/docs/oci-nuke.md).
+it from a `pull_request`-triggered job with `secrets: inherit` where forks can open PRs.
 
 <!-- --8<-- [start:exit-codes] -->
 ## Exit codes
