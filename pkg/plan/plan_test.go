@@ -10,6 +10,9 @@ import (
 const (
 	fixtureRegionFrankfurt = "eu-frankfurt-1"
 	fixtureTypeVCN         = "vcn"
+	fixtureTypeSubnet      = "Subnet"
+	fixtureCompartmentA    = "comp-a"
+	fixtureCompartmentB    = "comp-b"
 )
 
 // sharedFixtureEntries is the same logical set of entries used by every determinism test below.
@@ -19,22 +22,22 @@ func sharedFixtureEntries() (e1, e2, e3 Entry) {
 	e1 = Entry{
 		ResourceType:  fixtureTypeVCN,
 		ResourceID:    "res-b",
-		CompartmentID: "comp-a",
+		CompartmentID: fixtureCompartmentA,
 		Region:        fixtureRegionFrankfurt,
 		State:         StateWouldRemove,
 	}
 	e2 = Entry{
 		ResourceType:  fixtureTypeVCN,
 		ResourceID:    "res-a",
-		CompartmentID: "comp-a",
+		CompartmentID: fixtureCompartmentA,
 		Region:        fixtureRegionFrankfurt,
 		State:         StateWouldRemove,
 	}
 	e3 = Entry{
 		ResourceType:  "bucket",
 		ResourceID:    "res-c",
-		CompartmentID: "comp-b",
-		Region:        "us-ashburn-1",
+		CompartmentID: fixtureCompartmentB,
+		Region:        diffTestRegion,
 		State:         StateFiltered,
 	}
 	return e1, e2, e3
@@ -99,7 +102,7 @@ func TestHash_GoldenFile(t *testing.T) {
 				ResourceType:  "bucket",
 				ResourceID:    "my-bucket",
 				CompartmentID: "ocid1.compartment.oc1..bbbb",
-				Region:        "us-ashburn-1",
+				Region:        diffTestRegion,
 				State:         StateLeftover,
 				Reason:        scope.ReasonAPIError,
 				Detail:        "transient 500 from object storage",
@@ -107,7 +110,9 @@ func TestHash_GoldenFile(t *testing.T) {
 		},
 	}
 
-	const expectedHash = "10e0eb79515027136489503f084869c24f637adc1ad738803eebe17b976b90ca"
+	// Hash covers DecisionBody, which drops Detail (ADR-0004): the leftover's free-text detail is
+	// not part of these bytes, its reason is.
+	const expectedHash = "62cee8836f589ab33b1b1d086d32c0b7c3f31c5a73167bca182b9dec53eda4b4"
 
 	got, err := Hash(fixture)
 	if err != nil {
@@ -155,5 +160,89 @@ func TestCanonicalJSON_DoesNotMutateCallerOrder(t *testing.T) {
 		if body.Entries[i] != original[i] {
 			t.Fatalf("caller's entry order mutated at index %d: got %+v, want %+v", i, body.Entries[i], original[i])
 		}
+	}
+}
+
+// sandboxDriftBodies reproduces a refused apply in miniature: the same decision set, scanned
+// four minutes apart, with only non-decision entries differing -- a deferred compartment's
+// blocker prose and a stream pool that aged out of too-young into filtered.
+func sandboxDriftBodies() (approved, rescanned Body) {
+	vcn := Entry{
+		ResourceType: "Vcn", ResourceID: "vcn-1", CompartmentID: fixtureCompartmentA, Region: fixtureRegionFrankfurt,
+		State: StateWouldRemove,
+	}
+	deferred := Entry{
+		ResourceType: compartmentEntryResourceType, ResourceID: fixtureCompartmentB, CompartmentID: fixtureCompartmentB,
+		Region: diffTestRegion,
+		State:  StateSkipped, Reason: scope.ReasonCompartmentNotEmpty, Detail: "will still hold Vault v; VaultSecret s",
+	}
+	pool := Entry{
+		ResourceType: "StreamPool", ResourceID: "pool-1", CompartmentID: fixtureCompartmentA,
+		State: StateSkipped, Reason: scope.ReasonTooYoung,
+	}
+
+	approved = Body{SchemaVersion: SchemaVersion, Entries: []Entry{vcn, deferred, pool}}
+
+	deferred.Detail = "will still hold VaultSecret s; Vault v"
+	pool.Region, pool.State, pool.Reason, pool.Detail = fixtureRegionFrankfurt, StateFiltered, "", "StreamPool is DELETING"
+	rescanned = Body{SchemaVersion: SchemaVersion, Entries: []Entry{pool, deferred, vcn}}
+	return approved, rescanned
+}
+
+func mustHash(t *testing.T, body Body) string {
+	t.Helper()
+	h, err := Hash(body)
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	return h
+}
+
+func TestHash_IgnoresNonDecisionDrift(t *testing.T) {
+	approved, rescanned := sandboxDriftBodies()
+	if a, r := mustHash(t, approved), mustHash(t, rescanned); a != r {
+		t.Fatalf("non-decision drift changed the hash: approved=%s rescanned=%s\n%v", a, r,
+			Diff(DecisionBody(approved), DecisionBody(rescanned)))
+	}
+}
+
+// TestHash_ChangesWhenTheDecisionSetChanges is the half that keeps the gate a gate: anything that
+// changes what the run would delete -- or which compartments it would call Remove() on -- must
+// still change the hash.
+func TestHash_ChangesWhenTheDecisionSetChanges(t *testing.T) {
+	approved, _ := sandboxDriftBodies()
+	base := mustHash(t, approved)
+
+	mutations := map[string]func(b *Body){
+		"skipped resource becomes would-remove": func(b *Body) {
+			b.Entries[2].State, b.Entries[2].Reason = StateWouldRemove, ""
+		},
+		"would-remove resource disappears": func(b *Body) { b.Entries = b.Entries[1:] },
+		"would-remove resource becomes filtered": func(b *Body) {
+			b.Entries[0].State = StateFiltered
+		},
+		"new would-remove resource appears": func(b *Body) {
+			b.Entries = append(b.Entries, Entry{
+				ResourceType: fixtureTypeSubnet, ResourceID: "sn-1", CompartmentID: fixtureCompartmentA, State: StateWouldRemove,
+			})
+		},
+		"deferred compartment becomes would-remove": func(b *Body) {
+			b.Entries[1].State, b.Entries[1].Reason, b.Entries[1].Detail = StateWouldRemove, "", ""
+		},
+		"would-remove resource moves region": func(b *Body) { b.Entries[0].Region = diffTestRegion },
+		"unclassified future state is hashed": func(b *Body) {
+			b.Entries = append(b.Entries, Entry{
+				ResourceType: fixtureTypeSubnet, ResourceID: "sn-2", CompartmentID: fixtureCompartmentA, State: "failed",
+			})
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			b := Body{SchemaVersion: approved.SchemaVersion, Entries: append([]Entry(nil), approved.Entries...)}
+			mutate(&b)
+			if mustHash(t, b) == base {
+				t.Fatalf("hash unchanged after %q", name)
+			}
+		})
 	}
 }

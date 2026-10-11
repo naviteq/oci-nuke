@@ -609,16 +609,21 @@ The artifact's top-level shape:
       }
     ]
   },
-  "hash": "<sha256 of the canonical JSON encoding of body>",
+  "hash": "<sha256 of the canonical JSON encoding of body's decision set>",
   "generated_at": "2026-08-08T00:00:00Z"
 }
 ```
 
 `schema_version` is bumped only on a breaking change to `Entry` or `Body`. `hash` is a
-SHA-256 over `body` alone, computed after entries are sorted by (region, resource type,
-compartment, resource ID) — deterministic across runs and across machines, and independent
-of `generated_at` (metadata only, never part of the hashed bytes) — the value a future
-approval workflow can diff a stored plan against a freshly generated one with.
+SHA-256 over the body's **decision set**: every entry except `filtered` ones and `skipped` ones
+other than a compartment deferred as `compartment-not-empty`, with `detail` blanked, sorted by
+(region, resource type, compartment, resource ID). It is deterministic across runs and across
+machines, independent of `generated_at` (metadata only, never part of the hashed bytes), and it
+moves whenever what the run would delete moves — a resource entering or leaving `would-remove`,
+changing region or compartment, or a deferred compartment becoming deletable. It does not move
+when something the run leaves alone changes: a `too-young` resource ageing into `filtered`, a
+`TERMINATED` volume dropping out of a listing, or the wording of a `detail`.
+`docs/adr/0004-plan-hash-covers-the-decision-set.md` records why.
 
 Every entry's `state` is one of:
 
@@ -704,7 +709,8 @@ an accidental inefficiency: `libnuke.Nuke.Run()` exposes no hook between its sca
 removal pass, so a comparison trustworthy enough to gate a destructive run has to be a real
 second pass through the same pipeline, not a cached value read out of the first run's artifact.
 Budget CI job timeouts for roughly double a plan-only run's wall-clock and OCI API-call volume.
-A hash mismatch aborts the run before any resource is removed, printing which entries diverged.
+A hash mismatch aborts the run before any resource is removed, printing which decision-set
+entries diverged — only the lines that moved the hash.
 
 ### What `--force` means here
 

@@ -2,12 +2,13 @@ module github.com/naviteq/oci-nuke
 
 go 1.26
 
-toolchain go1.26.5
+toolchain go1.26.9
 
 require (
 	github.com/ekristen/libnuke v1.3.0
 	github.com/oracle/oci-go-sdk/v65 v65.123.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
+	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sync v0.20.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -20,7 +21,6 @@ require (
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mb0/glob v0.0.0-20160210091149-1eb79d2de6c4 // indirect
-	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/sony/gobreaker/v2 v2.4.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/stevenle/topsort v0.2.0 // indirect

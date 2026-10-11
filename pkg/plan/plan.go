@@ -94,8 +94,8 @@ func (b *Body) Sort() {
 // CanonicalJSON encodes body deterministically: entries are copied and sorted first (the
 // caller's own slice order is never mutated as a side effect it didn't ask for), then encoded
 // via a json.Encoder with SetEscapeHTML(false) -- the one, consistently applied encoding path.
-// Hash calls this function internally so the bytes that get hashed are always exactly the bytes
-// that would be written to disk, never a second, independently derived byte sequence.
+// Hash encodes DecisionBody(body) through this same function, so the hashed bytes are exactly the
+// bytes that body's decision set would be written as.
 func CanonicalJSON(body Body) ([]byte, error) {
 	sorted := Body{
 		SchemaVersion: body.SchemaVersion,
@@ -112,11 +112,38 @@ func CanonicalJSON(body Body) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Hash returns the hex-encoded SHA-256 sum of body's canonical JSON -- the plan hash Phase 7
-// will later diff an approval against. Never a second, independently derived byte sequence for
-// hashing vs. writing: this function calls CanonicalJSON internally.
+// DecisionBody returns the part of body an approval authorizes: every entry except the ones the
+// run leaves alone by construction -- filtered entries, and skipped entries other than a
+// compartment deferred as not empty -- with Detail cleared. See ADR-0004.
+//
+// The excluded entries are not decisions. A too-young resource crossing its min-age threshold, a
+// TERMINATED volume dropping out of a listing, or a free-text Detail are all outside what the
+// operator approves, and hashing them made every approval in a live sandbox race the tenancy. A
+// deferred compartment stays in because libnuke still calls Remove() on it; only its Detail, the
+// blocker prose, is dropped.
+//
+// The exclusion list is deliberately negative: a state added later is hashed until someone
+// decides otherwise, so forgetting to classify it fails closed (a spurious mismatch), never open.
+// Any entry that leaves the excluded states -- a skipped resource that becomes would-remove, a
+// filter dropped from the config -- enters the decision set and changes the hash.
+func DecisionBody(body Body) Body {
+	decisions := Body{SchemaVersion: body.SchemaVersion, Entries: []Entry{}}
+	for i := range body.Entries {
+		e := body.Entries[i]
+		if e.State == StateFiltered ||
+			(e.State == StateSkipped && e.Reason != scope.ReasonCompartmentNotEmpty) {
+			continue
+		}
+		e.Detail = ""
+		decisions.Entries = append(decisions.Entries, e)
+	}
+	return decisions
+}
+
+// Hash returns the hex-encoded SHA-256 sum of the canonical JSON of body's decision set
+// (DecisionBody) -- the plan hash an apply run's rescan must reproduce before it deletes anything.
 func Hash(body Body) (string, error) {
-	b, err := CanonicalJSON(body)
+	b, err := CanonicalJSON(DecisionBody(body))
 	if err != nil {
 		return "", err
 	}

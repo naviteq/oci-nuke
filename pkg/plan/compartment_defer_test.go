@@ -16,6 +16,9 @@ const (
 	protected       = "protected"
 	parent          = "parent"
 	gone            = "gone"
+
+	typeVault       = "Vault"
+	typeVaultSecret = "VaultSecret"
 )
 
 func compartmentEntry(id string) Entry {
@@ -34,17 +37,17 @@ func TestDeferNonEmptyCompartments(t *testing.T) {
 	entries := []Entry{
 		compartmentEntry(parent),
 		compartmentEntry(clean),
-		{ResourceType: "Subnet", ResourceID: "s", CompartmentID: clean, State: StateWouldRemove},
+		{ResourceType: fixtureTypeSubnet, ResourceID: "s", CompartmentID: clean, State: StateWouldRemove},
 		{ResourceType: "BootVolume", ResourceID: "bv", CompartmentID: clean, State: StateFiltered, Detail: "TERMINATED"},
 		compartmentEntry(pending),
-		{ResourceType: "Vault", ResourceID: "v", CompartmentID: pending, State: StateWouldRemove},
+		{ResourceType: typeVault, ResourceID: "v", CompartmentID: pending, State: StateWouldRemove},
 		compartmentEntry(protected),
 		{ResourceType: "Bucket", ResourceID: "b", CompartmentID: protected, State: StateSkipped, Reason: scope.ReasonProtectedByTag},
 		compartmentEntry(kept),
 		{ResourceType: "ObjectVersion", ResourceID: "o", CompartmentID: kept, State: StateFiltered, Detail: filteredByConfigDetail},
 		compartmentEntry(childOfDeferred),
 		compartmentEntry(grandchild),
-		{ResourceType: "VaultSecret", ResourceID: "sec", CompartmentID: grandchild, State: StateSkipped, Reason: scope.ReasonScheduledDeletion},
+		{ResourceType: typeVaultSecret, ResourceID: "sec", CompartmentID: grandchild, State: StateSkipped, Reason: scope.ReasonScheduledDeletion},
 	}
 
 	got := DeferNonEmptyCompartments(entries,
@@ -58,7 +61,7 @@ func TestDeferNonEmptyCompartments(t *testing.T) {
 		kept:            "ObjectVersion o (filtered by config)",
 		grandchild:      "VaultSecret sec (scheduled-deletion)",
 		childOfDeferred: "Compartment grandchild",
-		parent:          "Compartment pending; Compartment protected; Compartment kept; Compartment child-of-deferred",
+		parent:          "Compartment child-of-deferred; Compartment kept; Compartment pending; Compartment protected",
 	}
 	for _, e := range got {
 		if e.ResourceType != compartmentEntryResourceType {
@@ -74,5 +77,32 @@ func TestDeferNonEmptyCompartments(t *testing.T) {
 		if e.State != StateSkipped || e.Reason != scope.ReasonCompartmentNotEmpty || !strings.Contains(e.Detail, blocker) {
 			t.Errorf("%s = %s/%s %q, want skipped compartment-not-empty naming %q", e.ResourceID, e.State, e.Reason, e.Detail, blocker)
 		}
+	}
+}
+
+// TestDeferNonEmptyCompartments_DetailIndependentOfScanOrder pins a spurious approval refusal: libnuke's
+// concurrent scanners hand entries over in no fixed order, and a deferred compartment's detail
+// named its blockers in whatever order they arrived -- so two scans of an unchanged compartment
+// disagreed and the approved-plan gate refused the apply.
+func TestDeferNonEmptyCompartments_DetailIndependentOfScanOrder(t *testing.T) {
+	blockers := []Entry{
+		{ResourceType: typeVault, ResourceID: "v", CompartmentID: pending, State: StateSkipped, Reason: scope.ReasonScheduledDeletion},
+		{ResourceType: typeVaultSecret, ResourceID: "sec", CompartmentID: pending, State: StateSkipped, Reason: scope.ReasonScheduledDeletion},
+		{ResourceType: "KmsKey", ResourceID: "k", CompartmentID: pending, State: StateSkipped, Reason: scope.ReasonScheduledDeletion},
+	}
+	detail := func(order ...int) string {
+		entries := []Entry{compartmentEntry(pending)}
+		for _, i := range order {
+			entries = append(entries, blockers[i])
+		}
+		got := DeferNonEmptyCompartments(entries,
+			func(string) []string { return nil },
+			func(string) (string, bool) { return "", false })
+		return got[0].Detail
+	}
+
+	first, second := detail(0, 1, 2), detail(1, 0, 2)
+	if first != second {
+		t.Fatalf("detail depends on scan order:\n%s\n%s", first, second)
 	}
 }
