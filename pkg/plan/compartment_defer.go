@@ -50,7 +50,11 @@ func DeferNonEmptyCompartments(
 	stays := map[string]bool{}
 	blockersOf := func(id string) []string {
 		blockers := residueIn(entries, contents[id])
-		return append(blockers, stayingChildren(entries, compartments, stays, id, children, lifecycleState)...)
+		blockers = append(blockers, stayingChildren(entries, compartments, stays, id, children, lifecycleState)...)
+		// entries arrive in libnuke's concurrent scan order; sorted, two scans of the same
+		// compartment name its blockers in the same order.
+		sort.Strings(blockers)
+		return blockers
 	}
 	for changed := true; changed; {
 		changed = false

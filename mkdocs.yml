@@ -49,3 +49,5 @@ nav:
   - Design decisions:
       - Build on libnuke: adr/0001-build-on-libnuke.md
       - Cobra over urfave/cli: adr/0002-cobra-over-urfave-cli.md
+      - Tenancy-root type allowance: adr/0003-tenancy-root-type-allowance.md
+      - Plan hash covers the decision set: adr/0004-plan-hash-covers-the-decision-set.md

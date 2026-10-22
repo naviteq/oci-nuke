@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0] (2026-10-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **plan:** this changes a documented safety property, which the project defines as breaking regardless of semver. Any change to what the run would delete still refuses the apply; a change confined to entries the run leaves alone no longer does. Hashes are not comparable with earlier releases: an artifact planned by an older binary fails --approved-plan's self-consistency check and must be re-planned. See docs/adr/0004-plan-hash-covers-the-decision-set.md.
+
+### Features
+
+* **plan:** hash the decision set, not the whole plan
+
 ## [2.2.0] (2026-10-05)
 
 

@@ -450,7 +450,8 @@ func loadApprovedPlan(path string, maxAge time.Duration) (plan.Artifact, error) 
 		return plan.Artifact{}, fmt.Errorf("recomputing approved plan %s's own hash: %w", path, err)
 	} else if wantHash != artifact.Hash {
 		return plan.Artifact{}, fmt.Errorf(
-			"approved plan %s is internally inconsistent: stored hash %s does not match its own body's hash %s",
+			"approved plan %s is internally inconsistent: stored hash %s does not match its own body's hash %s "+
+				"(a plan written by an oci-nuke release older than 3.0.0 hashed its whole body: re-plan with this release)",
 			path, artifact.Hash, wantHash,
 		)
 	}
@@ -550,9 +551,11 @@ func verifyApprovedPlanGate(
 //
 // On a hash mismatch, this returns a non-nil *ExitError{Code: ExitRefused} whose message names
 // both hashes and includes plan.Diff's line-by-line report of what changed (threat T-07-07:
-// mismatch aborts are never unexplained). A failure of the rescan itself (not a hash comparison
-// at all -- a genuine internal/API failure mid-scan) is returned unwrapped, matching this file's
-// existing convention that only safety-model refusals get ExitRefused.
+// mismatch aborts are never unexplained). The report diffs the two decision sets, the exact
+// input the hashes were computed over, so every line it prints is a line that moved the hash. A
+// failure of the rescan itself (not a hash comparison at all -- a genuine internal/API failure
+// mid-scan) is returned unwrapped, matching this file's existing convention that only
+// safety-model refusals get ExitRefused.
 func verifyApprovedPlan(
 	pr *pipelineRun,
 	params *libnuke.Parameters,
@@ -593,7 +596,8 @@ func verifyApprovedPlan(
 	if freshArtifact.Hash != approved.Hash {
 		return &ExitError{Code: ExitRefused, Err: fmt.Errorf(
 			"approved plan hash mismatch (approved=%s, current=%s): tenancy state has drifted since approval:\n%s",
-			approved.Hash, freshArtifact.Hash, strings.Join(plan.Diff(approved.Body, freshArtifact.Body), "\n"),
+			approved.Hash, freshArtifact.Hash,
+			strings.Join(plan.Diff(plan.DecisionBody(approved.Body), plan.DecisionBody(freshArtifact.Body)), "\n"),
 		)}
 	}
 

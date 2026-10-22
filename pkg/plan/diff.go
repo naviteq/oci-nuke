@@ -32,11 +32,11 @@ func diffKey(e *Entry) string {
 //	"- <type> <id> (<region>/<compartment>): <state>"   -- only in old
 //	"~ <type> <id> (<region>/<compartment>): <what changed>" -- present in both, State/Reason/
 //	                                                            Detail differs (WR-01, 07-REVIEW.md:
-//	                                                            Hash covers the whole Entry, so a
-//	                                                            same-State pair whose Reason or
-//	                                                            Detail differs is still a genuine
-//	                                                            hash-affecting difference and must
-//	                                                            not print an empty diff)
+//	                                                            a same-State pair whose Reason or
+//	                                                            Detail differs must not print an
+//	                                                            empty diff; the approval gate
+//	                                                            passes DecisionBody, so Detail is
+//	                                                            already blank there)
 //	"! <type> <id> (<region>/<compartment>): <note>"     -- WR-05, 07-REVIEW.md: this key appeared
 //	                                                         more than once within a single body;
 //	                                                         Diff only compared the last occurrence
@@ -120,11 +120,11 @@ func diffByKeyDetectingDuplicates(entries []Entry) (byKey map[string]Entry, dupl
 }
 
 // diffDescription builds the "what changed" description Diff prints for a same-key entry present
-// in both bodies (WR-01, 07-REVIEW.md). Comparing State alone missed genuine differences: Hash's
-// CanonicalJSON input covers the whole Entry, so two entries with identical
-// ResourceType|ResourceID|Region|CompartmentID|State but a different Reason or Detail (e.g. a
-// leftover whose blocking cause changed between approval and rescan, or a skip whose reason moved
-// from blocklisted to protected-by-tag) genuinely hash differently, but a State-only comparison
+// in both bodies (WR-01, 07-REVIEW.md). Comparing State alone missed genuine differences: Hash
+// covers Reason as well as State, so two entries with identical
+// ResourceType|ResourceID|Region|CompartmentID|State but a different Reason (e.g. a leftover
+// whose blocking cause changed between approval and rescan) genuinely hash differently, and
+// Detail is still compared for callers diffing whole bodies rather than decision sets. A State-only comparison
 // would print no line for them at all -- an operator would see "tenancy state has drifted since
 // approval:" followed by nothing. Each differing field gets its own clause; an empty return means
 // old and new are identical across all three fields (no line should be printed for this key).
