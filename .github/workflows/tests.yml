@@ -11,16 +11,21 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: '1.26.x'
+  GO_VERSION: '1.27.x'
   # The linter binary version. `.golangci.yml`'s `version: "2"` is the config schema
   # version, not this -- they move independently. Keep this in step with the version
   # developers run locally so CI and local results agree.
-  GOLANGCI_LINT_VERSION: v2.12.2
+  GOLANGCI_LINT_VERSION: v2.15.0
 
 jobs:
   lint:
     name: golangci-lint
-    runs-on: ubuntu-latest
+    # The org variable names the self-hosted ARC pool; where it is unset, as in the public
+    # mirror, jobs fall back to a GitHub-hosted runner. The pool mixes amd64 and arm64, so
+    # nothing here may assume the runner's architecture. HEAVY_RUNNER, a repository variable,
+    # names a bigger pool for the jobs that compile oci-go-sdk: they run out of memory on the
+    # default one.
+    runs-on: ${{ vars.HEAVY_RUNNER || vars.DEFAULT_ORG_RUNNER || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -39,7 +44,7 @@ jobs:
 
   test:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.HEAVY_RUNNER || vars.DEFAULT_ORG_RUNNER || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -54,7 +59,7 @@ jobs:
     # the public mirror there is nothing to run. The mirror's tree is scanned instead, in
     # --strict mode, before it is ever pushed.
     if: github.repository_owner != 'naviteq'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.DEFAULT_ORG_RUNNER || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,9 +84,32 @@ jobs:
   # leaked cluster to notice.
   e2e-harness-scripts:
     name: e2e harness scripts
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.DEFAULT_ORG_RUNNER || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # GitHub's image ships shellcheck, the self-hosted image does not. Pinned so both runners
+      # lint with the same version. Not github-workflows' ensure-tool: this file is mirrored, and
+      # a pinned github-workflows SHA does not exist in the mirror's naviteq/github-actions.
+      - name: install shellcheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+        run: |
+          set -euo pipefail
+          if [ "$(shellcheck --version 2>/dev/null | awk '/^version:/ {print $2}')" = "${SHELLCHECK_VERSION#v}" ]; then
+            exit 0
+          fi
+          case "$(uname -m)" in
+            x86_64) arch=x86_64 sha256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 ;;
+            aarch64 | arm64) arch=aarch64 sha256=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588 ;;
+            *) echo "::error::no shellcheck build for $(uname -m)"; exit 1 ;;
+          esac
+          curl -sSfLo /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.${arch}.tar.xz"
+          echo "${sha256}  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          install -m 0755 "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" "$HOME/.local/bin/shellcheck"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: shellcheck
         run: shellcheck -S style test/e2e/harness/*.sh
       - name: harness self-test
@@ -89,7 +117,7 @@ jobs:
 
   build:
     name: build (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.HEAVY_RUNNER || vars.DEFAULT_ORG_RUNNER || 'ubuntu-26.04' }}
     strategy:
       matrix:
         include:

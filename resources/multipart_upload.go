@@ -85,6 +85,7 @@ func multipartUploadList(
 					namespace:     namespace,
 					bucketName:    bucketName,
 					compartmentID: *bucket.CompartmentId,
+					tags:          tagsOf(&bucket),
 					mu:            resp.Items[j],
 				})
 			}
@@ -106,6 +107,7 @@ type MultipartUpload struct {
 	namespace     string
 	bucketName    string
 	compartmentID string
+	tags          bucketTags
 	mu            objectstorage.MultipartUpload
 }
 
@@ -135,11 +137,11 @@ func (r *MultipartUpload) Filter() error { return nil }
 // SafetyEvaluated doc comment for why protection moved here from Remove() (04-13 plan/apply
 // divergence fix).
 //
-// freeformTags/definedTags are passed nil -- objectstorage.MultipartUpload carries neither
-// field.
+// The tags are the owning bucket's (bucketTags): the summary carries none of its own, so
+// a protect-by-tag match on the bucket protects this too.
 func (r *MultipartUpload) SafetyTags() (freeform, defined map[string]string, createdAt time.Time) {
 	x := r.mu
-	return nil, nil, x.TimeCreated.Time
+	return r.tags.freeform, r.tags.defined, x.TimeCreated.Time
 }
 
 // Remove is a direct delete call -- protect-by-tag/min-age protection is now applied at SCAN

@@ -89,6 +89,7 @@ func replicationPolicyList(
 					namespace:     namespace,
 					bucketName:    bucketName,
 					compartmentID: *bucket.CompartmentId,
+					tags:          tagsOf(&bucket),
 					policy:        resp.Items[j],
 				})
 			}
@@ -108,6 +109,7 @@ type ReplicationPolicy struct {
 	namespace     string
 	bucketName    string
 	compartmentID string
+	tags          bucketTags
 	policy        objectstorage.ReplicationPolicySummary
 }
 
@@ -138,10 +140,11 @@ func (r *ReplicationPolicy) Filter() error { return nil }
 // SafetyEvaluated doc comment for why protection moved here from Remove() (04-13 plan/apply
 // divergence fix).
 //
-// freeformTags/definedTags are passed nil -- ReplicationPolicySummary carries neither field.
+// The tags are the owning bucket's (bucketTags): the summary carries none of its own, so
+// a protect-by-tag match on the bucket protects this too.
 func (r *ReplicationPolicy) SafetyTags() (freeform, defined map[string]string, createdAt time.Time) {
 	x := r.policy
-	return nil, nil, x.TimeCreated.Time
+	return r.tags.freeform, r.tags.defined, x.TimeCreated.Time
 }
 
 // Remove is a direct delete call -- protect-by-tag/min-age protection is now applied at SCAN

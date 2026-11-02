@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.1.0] (2026-11-01)
+
+
+### Features
+
+* **resources:** judge a bucket's contents by the bucket's tags
+
+## [3.0.1] (2026-10-26)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/oracle/oci-go-sdk/v65 to v65.126.2
+* **deps:** update module github.com/oracle/oci-go-sdk/v65 to v65.128.0
+* **deps:** update module github.com/sirupsen/logrus to v1.10.2
+* **deps:** update module golang.org/x/sync to v0.24.0
+
 ## [3.0.0] (2026-10-11)
 
 
