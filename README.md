@@ -369,15 +369,16 @@ perfectly well be used through `eu-frankfurt-1`.
 `settings` (protect-by-tag, minimum age, vault deletion window, compartment deletion) and
 per-compartment `filters` are optional; `config.example.yaml` documents both inline.
 
-**Objects carry no tags, so protect-by-tag cannot reach them.** In OCI, freeform and defined
-tags exist on the bucket, never on the objects inside it. `settings.protect.tags` therefore
-protects a `Bucket` and leaves every `ObjectVersion` in it listed for deletion — the bucket
-survives, its contents do not, which is worse than either outcome on purpose. Objects are
-excluded by filtering `ObjectVersion` on its `bucket` property instead. Tag namespaces are a
-different problem again: deleting one cascades through every tag definition and value under
-it, including tags on resources outside the run's compartment, so they are excluded by type
-rather than scoped by filter. [`config.protect.example.yaml`](./config.protect.example.yaml)
-is a worked example of all three.
+**A bucket's tags protect what is inside it.** In OCI, freeform and defined tags exist on the
+bucket, never on its objects, multipart uploads, pre-authenticated requests, retention rules or
+replication policies. Each of those is judged by its bucket's tags, so `settings.protect.tags`
+keeps a tagged bucket and its contents together rather than leaving an empty bucket behind.
+Releases before this one protected the bucket alone, so older configs filter `ObjectVersion` on
+its `bucket` property as well; that filter still works and is no longer needed. Tag namespaces
+are a different problem: deleting one cascades through every tag definition and value under it,
+including tags on resources outside the run's compartment, so they are excluded by type rather
+than scoped by filter. [`config.protect.example.yaml`](./config.protect.example.yaml) is a
+worked example of both.
 
 ## Usage
 

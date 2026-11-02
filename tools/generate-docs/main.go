@@ -147,7 +147,7 @@ func renderIndex(entries []indexEntry) string {
 		for _, e := range byScope[scope] {
 			note := ""
 			if e.AltResource != "" {
-				note = fmt.Sprintf("alternative resource: `%s`", e.AltResource)
+				note = fmt.Sprintf("alternative resource: %#q", e.AltResource)
 			}
 			fmt.Fprintf(&b, "| [%s](%s.md) | %s |\n", e.Name, e.Name, note)
 		}

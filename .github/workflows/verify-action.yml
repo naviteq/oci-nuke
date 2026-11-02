@@ -48,7 +48,7 @@ jobs:
         github.event.review.state == 'approved' &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) &&
         !contains(fromJSON('["DovnarAlexander", "release-naviteq-io[bot]"]'), github.event.pull_request.user.login))
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.DEFAULT_ORG_RUNNER || 'ubuntu-26.04' }}
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -70,8 +70,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # One runner per archive the release ships: linux/amd64, linux/arm64, darwin/arm64.
-        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        # One runner per archive the release ships: linux/amd64, linux/arm64, darwin/arm64. With
+        # the org runner set, the matrix is that one self-hosted pool, which has no macOS and
+        # mixes architectures; the GitHub-hosted fallback, as in the public mirror, covers all three.
+        runner: >-
+          ${{ fromJSON(vars.DEFAULT_ORG_RUNNER && format('["{0}"]', vars.DEFAULT_ORG_RUNNER)
+          || '["ubuntu-26.04", "ubuntu-26.04-arm", "macos-latest"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -106,11 +110,16 @@ jobs:
   rejects:
     name: rejects bad input
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.DEFAULT_ORG_RUNNER || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The self-hosted image bakes a copy of oci-nuke, so "nothing was installed" means PATH
+      # resolves oci-nuke exactly as it did before the refused installs, not that it is absent.
+      - name: record what PATH resolves before the refused installs
+        id: before
+        run: echo "path=$(command -v oci-nuke || true)" >> "$GITHUB_OUTPUT"
       - name: version "latest"
         id: latest
         continue-on-error: true
@@ -144,6 +153,7 @@ jobs:
           NO_PREFIX: ${{ steps.no-prefix.outcome }}
           NO_TOKEN: ${{ steps.no-token.outcome }}
           MISSING_TAG: ${{ steps.missing-tag.outcome }}
+          BEFORE: ${{ steps.before.outputs.path }}
         run: |
           set -euo pipefail
           status=0
@@ -155,8 +165,9 @@ jobs:
               status=1
             fi
           done
-          if command -v oci-nuke >/dev/null 2>&1; then
-            echo "::error::a refused install still left oci-nuke on PATH at $(command -v oci-nuke)"
+          after="$(command -v oci-nuke || true)"
+          if [ "${after}" != "${BEFORE}" ]; then
+            echo "::error::a refused install changed what PATH resolves oci-nuke to: '${BEFORE}' before, '${after}' after"
             status=1
           fi
           exit "${status}"

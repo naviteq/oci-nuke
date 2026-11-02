@@ -91,6 +91,7 @@ func objectVersionList(
 					namespace:     namespace,
 					bucketName:    bucketName,
 					compartmentID: *bucket.CompartmentId,
+					tags:          tagsOf(&bucket),
 					ov:            resp.Items[j],
 				})
 			}
@@ -112,6 +113,7 @@ type ObjectVersion struct {
 	namespace     string
 	bucketName    string
 	compartmentID string
+	tags          bucketTags
 	ov            objectstorage.ObjectVersionSummary
 }
 
@@ -142,11 +144,11 @@ func (r *ObjectVersion) Filter() error { return nil }
 // SafetyEvaluated doc comment for why protection moved here from Remove() (04-13 plan/apply
 // divergence fix).
 //
-// freeformTags/definedTags are passed nil -- ObjectVersionSummary carries neither field, so
-// this type does not support protect-by-tag matching (nothing to match against).
+// The tags are the owning bucket's (bucketTags): the summary carries none of its own, so
+// a protect-by-tag match on the bucket protects this too.
 func (r *ObjectVersion) SafetyTags() (freeform, defined map[string]string, createdAt time.Time) {
 	x := r.ov
-	return nil, nil, timeCreatedOrZero(x.TimeCreated)
+	return r.tags.freeform, r.tags.defined, timeCreatedOrZero(x.TimeCreated)
 }
 
 // Remove is a direct delete call -- protect-by-tag/min-age protection is now applied at SCAN

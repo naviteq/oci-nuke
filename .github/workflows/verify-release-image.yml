@@ -29,7 +29,7 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.DEFAULT_ORG_RUNNER || 'ubuntu-26.04' }}
     permissions:
       packages: read # pull the image and its signature from ghcr.io
     steps:
@@ -38,7 +38,7 @@ jobs:
       - name: setup docker buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: login to ghcr.io
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -48,12 +48,17 @@ jobs:
       - name: install cosign
         run: |
           set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64 | arm64) arch=arm64 ;;
+            *) echo "::error::no cosign build for $(uname -m)"; exit 1 ;;
+          esac
           mkdir -p "$HOME/.local/bin"
           curl -sSfLo /tmp/cosign \
-            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${arch}"
           curl -sSfLo /tmp/cosign_checksums.txt \
             "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt"
-          EXPECTED=$(grep ' cosign-linux-amd64$' /tmp/cosign_checksums.txt | cut -d' ' -f1)
+          EXPECTED=$(grep " cosign-linux-${arch}\$" /tmp/cosign_checksums.txt | cut -d' ' -f1)
           echo "${EXPECTED}  /tmp/cosign" | sha256sum -c -
           install -m 0755 /tmp/cosign "$HOME/.local/bin/cosign"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

@@ -58,6 +58,20 @@ type objectStorageClient interface {
 	) (objectstorage.DeleteReplicationPolicyResponse, error)
 }
 
+// bucketTags is a bucket's tags in the shape SafetyTags returns. Objects, multipart uploads,
+// pre-authenticated requests, retention rules and replication policies carry no tags of their own,
+// so each inherits its bucket's: a bucket protected by tag keeps everything inside it, instead of
+// surviving as an empty bucket while its contents are deleted.
+type bucketTags struct {
+	freeform map[string]string
+	defined  map[string]string
+}
+
+// tagsOf reads b's tags, which listBucketsInCompartment fetches (Fields=tags) for exactly this.
+func tagsOf(b *objectstorage.BucketSummary) bucketTags {
+	return bucketTags{freeform: b.FreeformTags, defined: flattenDefinedTags(b.DefinedTags)}
+}
+
 // listBucketsInCompartment paginates objectstorage.ListBuckets for namespace+compartmentID and
 // returns every objectstorage.BucketSummary across all pages. Shared by every one of this plan's
 // six listers -- each one calls client.GetNamespace once, then this helper, then enumerates its

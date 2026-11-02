@@ -36,29 +36,12 @@ resource-types:
 # here. `defined: true` reads a defined tag ("<namespace>.<key>") instead of a
 # freeform one; use it if your tag namespace is itself protected from edits.
 #
-# This covers Bucket. It does NOT cover the objects inside — see below.
+# This covers the bucket and everything inside it. Objects, multipart uploads,
+# pre-authenticated requests, retention rules and replication policies carry no
+# OCI tags of their own, so each is judged by its bucket's tags: a tagged bucket
+# keeps its contents, with no per-bucket filter to keep in step.
 settings:
   protect:
     tags:
       - key: Persistent
         value: "true"
-
-# ── Objects inside those buckets ────────────────────────────────────────────────
-#
-# Object Storage objects carry no OCI tags at all — only buckets do — so
-# settings.protect.tags can never match an ObjectVersion, and a tagged bucket whose
-# objects are unfiltered still has every version listed for deletion. The bucket
-# name is the only property that ties a version back to what protects it, which is
-# why this one list is by name and has to be kept in step with the tagged buckets.
-#
-# Filters are keyed by the OCID of the compartment the resources live in — the
-# compartment that owns the buckets, which is not necessarily the run's target.
-filters:
-  ocid1.compartment.oc1..aaaaaaaaexamplesandboxcompartmentexampleexampleexamplex:
-    filters:
-      ObjectVersion:
-        - property: bucket
-          type: In
-          values:
-            - my-terraform-state
-            - my-terraform-state-replica
