@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.1.1] (2026-11-16)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/oracle/oci-go-sdk/v65 to v65.130.0
+* **deps:** update module golang.org/x/sync to v0.25.0
+
 ## [3.1.0] (2026-11-01)
 
 
